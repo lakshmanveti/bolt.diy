@@ -9,6 +9,7 @@ import { classNames } from '~/utils/classNames';
 import { Terminal, type TerminalRef } from './Terminal';
 import { TerminalManager } from './TerminalManager';
 import { createScopedLogger } from '~/utils/logger';
+import { APP_NAME } from '~/utils/brand';
 
 const logger = createScopedLogger('Terminal');
 
@@ -153,7 +154,7 @@ export const TerminalTabs = memo(() => {
                       onClick={() => setActiveTerminal(index)}
                     >
                       <div className="i-ph:terminal-window-duotone text-lg" />
-                      Bolt Terminal
+                      {APP_NAME} Terminal
                     </button>
                   ) : (
                     <React.Fragment>

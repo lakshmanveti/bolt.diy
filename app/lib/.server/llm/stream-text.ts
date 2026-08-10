@@ -1,5 +1,5 @@
 import { convertToCoreMessages, streamText as _streamText, type Message } from 'ai';
-import { MAX_TOKENS, PROVIDER_COMPLETION_LIMITS, isReasoningModel, type FileMap } from './constants';
+import { MAX_TOKENS, PROVIDER_COMPLETION_LIMITS, isReasoningModel, modelRejectsTemperature, type FileMap } from './constants';
 import { getSystemPrompt } from '~/lib/common/prompts/prompts';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, MODIFICATIONS_TAG_NAME, PROVIDER_LIST, WORK_DIR } from '~/utils/constants';
 import type { IProviderSetting } from '~/types/model';
@@ -223,8 +223,9 @@ export async function streamText(props: {
 
   // Log reasoning model detection and token parameters
   const isReasoning = isReasoningModel(modelDetails.name);
+  const omitSampling = modelRejectsTemperature(modelDetails.name);
   logger.info(
-    `Model "${modelDetails.name}" is reasoning model: ${isReasoning}, using ${isReasoning ? 'maxCompletionTokens' : 'maxTokens'}: ${safeMaxTokens}`,
+    `Model "${modelDetails.name}" is reasoning model: ${isReasoning}, omitSampling: ${omitSampling}, using ${isReasoning ? 'maxCompletionTokens' : 'maxTokens'}: ${safeMaxTokens}`,
   );
 
   // Validate token limits before API call
@@ -237,15 +238,16 @@ export async function streamText(props: {
   // Use maxCompletionTokens for reasoning models (o1, GPT-5), maxTokens for traditional models
   const tokenParams = isReasoning ? { maxCompletionTokens: safeMaxTokens } : { maxTokens: safeMaxTokens };
 
-  // Filter out unsupported parameters for reasoning models
+  // Strip sampling params for models that reject them (OpenAI reasoning + newer Claude Opus/Sonnet)
   const filteredOptions =
-    isReasoning && options
+    omitSampling && options
       ? Object.fromEntries(
           Object.entries(options).filter(
             ([key]) =>
               ![
                 'temperature',
                 'topP',
+                'topK',
                 'presencePenalty',
                 'frequencyPenalty',
                 'logprobs',
@@ -262,6 +264,7 @@ export async function streamText(props: {
     JSON.stringify(
       {
         isReasoning,
+        omitSampling,
         originalOptions: options || {},
         filteredOptions,
         originalOptionsKeys: options ? Object.keys(options) : [],
@@ -284,9 +287,6 @@ export async function streamText(props: {
     ...tokenParams,
     messages: convertToCoreMessages(processedMessages as any),
     ...filteredOptions,
-
-    // Set temperature to 1 for reasoning models (required by OpenAI API)
-    ...(isReasoning ? { temperature: 1 } : {}),
   };
 
   // DEBUG: Log final streaming parameters

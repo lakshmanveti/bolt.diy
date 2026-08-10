@@ -1,4 +1,4 @@
-import { useParams } from '@remix-run/react';
+import { useLocation, useParams } from '@remix-run/react';
 import { classNames } from '~/utils/classNames';
 import { type ChatHistoryItem } from '~/lib/persistence';
 import WithTooltip from '~/components/ui/Tooltip';
@@ -26,7 +26,9 @@ export function HistoryItem({
   onToggleSelection,
 }: HistoryItemProps) {
   const { id: urlId } = useParams();
+  const location = useLocation();
   const isActiveChat = urlId === item.urlId;
+  const chatBase = location.pathname.startsWith('/studio') ? '/studio/chat' : '/chat';
 
   const { editing, handleChange, handleBlur, handleSubmit, handleKeyDown, currentDescription, toggleEditMode } =
     useEditChatDescription({
@@ -104,7 +106,7 @@ export function HistoryItem({
         </form>
       ) : (
         <a
-          href={`/chat/${item.urlId}`}
+          href={`${chatBase}/${item.urlId}`}
           className="flex w-full relative truncate block"
           onClick={selectionMode ? handleItemClick : undefined}
         >

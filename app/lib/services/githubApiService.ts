@@ -6,6 +6,7 @@ import type {
   GitHubStats,
   GitHubLanguageStats,
 } from '~/types/GitHub';
+import { APP_USER_AGENT } from '~/utils/brand';
 
 export interface GitHubApiServiceConfig {
   token?: string;
@@ -52,7 +53,7 @@ export class GitHubApiServiceClass {
       headers: {
         Accept: 'application/vnd.github.v3+json',
         Authorization: `${this._config.tokenType === 'classic' ? 'token' : 'Bearer'} ${this._config.token}`,
-        'User-Agent': 'Bolt.diy',
+        'User-Agent': APP_USER_AGENT,
         ...options.headers,
       },
       ...options,
@@ -138,7 +139,7 @@ export class GitHubApiServiceClass {
       headers: {
         Accept: 'application/vnd.github.v3+json',
         Authorization: `${this._config.tokenType === 'classic' ? 'token' : 'Bearer'} ${this._config.token}`,
-        'User-Agent': 'Bolt.diy',
+        'User-Agent': APP_USER_AGENT,
       },
     });
 
@@ -166,7 +167,7 @@ export class GitHubApiServiceClass {
       headers: {
         Accept: 'application/vnd.github.v3+json',
         Authorization: `${this._config.tokenType === 'classic' ? 'token' : 'Bearer'} ${this._config.token}`,
-        'User-Agent': 'Bolt.diy',
+        'User-Agent': APP_USER_AGENT,
       },
     });
 
@@ -194,7 +195,7 @@ export class GitHubApiServiceClass {
       headers: {
         Accept: 'application/vnd.github.v3+json',
         Authorization: `${this._config.tokenType === 'classic' ? 'token' : 'Bearer'} ${this._config.token}`,
-        'User-Agent': 'Bolt.diy',
+        'User-Agent': APP_USER_AGENT,
       },
     });
 

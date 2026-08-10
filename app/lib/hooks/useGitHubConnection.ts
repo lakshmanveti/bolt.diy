@@ -5,6 +5,7 @@ import Cookies from 'js-cookie';
 import type { GitHubUserResponse, GitHubConnection } from '~/types/GitHub';
 import { useGitHubAPI } from './useGitHubAPI';
 import { githubConnection, isConnecting, updateGitHubConnection } from '~/lib/stores/github';
+import { APP_USER_AGENT } from '~/utils/brand';
 
 export interface ConnectionState {
   isConnected: boolean;
@@ -76,7 +77,7 @@ export function useGitHubConnection(): UseGitHubConnectionReturn {
         headers: {
           Accept: 'application/vnd.github.v3+json',
           Authorization: `${connection.tokenType === 'classic' ? 'token' : 'Bearer'} ${connection.token}`,
-          'User-Agent': 'Bolt.diy',
+          'User-Agent': APP_USER_AGENT,
         },
       });
 
@@ -119,7 +120,7 @@ export function useGitHubConnection(): UseGitHubConnectionReturn {
         headers: {
           Accept: 'application/vnd.github.v3+json',
           Authorization: `${tokenType === 'classic' ? 'token' : 'Bearer'} ${token}`,
-          'User-Agent': 'Bolt.diy',
+          'User-Agent': APP_USER_AGENT,
         },
       });
 
@@ -224,7 +225,7 @@ export function useGitHubConnection(): UseGitHubConnectionReturn {
         headers: {
           Accept: 'application/vnd.github.v3+json',
           Authorization: `${connection.tokenType === 'classic' ? 'token' : 'Bearer'} ${connection.token}`,
-          'User-Agent': 'Bolt.diy',
+          'User-Agent': APP_USER_AGENT,
         },
       });
 

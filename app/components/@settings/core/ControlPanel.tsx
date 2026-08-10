@@ -8,11 +8,12 @@ import { useNotifications } from '~/lib/hooks/useNotifications';
 import { useConnectionStatus } from '~/lib/hooks/useConnectionStatus';
 import { tabConfigurationStore, resetTabConfiguration } from '~/lib/stores/settings';
 import { profileStore } from '~/lib/stores/profile';
-import type { TabType, Profile } from './types';
-import { TAB_LABELS, DEFAULT_TAB_CONFIG, TAB_DESCRIPTIONS } from './constants';
+import type { TabType, Profile, TabVisibilityConfig } from './types';
+import { TAB_LABELS, DEFAULT_TAB_CONFIG, TAB_DESCRIPTIONS, PRIMARY_INTEGRATION_TABS } from './constants';
 import { DialogTitle } from '~/components/ui/Dialog';
 import { AvatarDropdown } from './AvatarDropdown';
 import BackgroundRays from '~/components/ui/BackgroundRays';
+import { Switch } from '~/components/ui/Switch';
 
 // Import all tab components
 import ProfileTab from '~/components/@settings/tabs/profile/ProfileTab';
@@ -35,6 +36,8 @@ interface ControlPanelProps {
   onClose: () => void;
 }
 
+const PRIMARY_TAB_SET = new Set<TabType>(PRIMARY_INTEGRATION_TABS);
+
 // Beta status for experimental features
 const BETA_TABS = new Set<TabType>(['local-providers', 'mcp']);
 
@@ -44,11 +47,58 @@ const BetaLabel = () => (
   </div>
 );
 
+function TabGrid({
+  tabs,
+  open,
+  activeTab,
+  loadingTab,
+  onTabClick,
+  getTabUpdateStatus,
+  getStatusMessage,
+}: {
+  tabs: TabVisibilityConfig[];
+  open: boolean;
+  activeTab: TabType | null;
+  loadingTab: TabType | null;
+  onTabClick: (tabId: TabType) => void;
+  getTabUpdateStatus: (tabId: TabType) => boolean;
+  getStatusMessage: (tabId: TabType) => string;
+}) {
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 relative">
+      {tabs.map((tab, index) => (
+        <div
+          key={tab.id}
+          className={classNames('aspect-[1.5/1] transition-transform duration-100 ease-out', 'hover:scale-[1.01]')}
+          style={{
+            animationDelay: `${index * 30}ms`,
+            animation: open ? 'fadeInUp 200ms ease-out forwards' : 'none',
+          }}
+        >
+          <TabTile
+            tab={tab}
+            onClick={() => onTabClick(tab.id as TabType)}
+            isActive={activeTab === tab.id}
+            hasUpdate={getTabUpdateStatus(tab.id)}
+            statusMessage={getStatusMessage(tab.id)}
+            description={TAB_DESCRIPTIONS[tab.id]}
+            isLoading={loadingTab === tab.id}
+            className="h-full relative"
+          >
+            {BETA_TABS.has(tab.id) && <BetaLabel />}
+          </TabTile>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
   // State
   const [activeTab, setActiveTab] = useState<TabType | null>(null);
   const [loadingTab, setLoadingTab] = useState<TabType | null>(null);
   const [showTabManagement, setShowTabManagement] = useState(false);
+  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
 
   // Store values
   const tabConfiguration = useStore(tabConfigurationStore);
@@ -91,6 +141,19 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
       .sort((a, b) => a.order - b.order);
   }, [tabConfiguration, profile?.preferences?.notifications, baseTabConfig]);
 
+  const primaryTabs = useMemo(
+    () =>
+      visibleTabs
+        .filter((tab) => PRIMARY_TAB_SET.has(tab.id))
+        .sort((a, b) => PRIMARY_INTEGRATION_TABS.indexOf(a.id) - PRIMARY_INTEGRATION_TABS.indexOf(b.id)),
+    [visibleTabs],
+  );
+
+  const advancedTabs = useMemo(
+    () => visibleTabs.filter((tab) => !PRIMARY_TAB_SET.has(tab.id)),
+    [visibleTabs],
+  );
+
   // Reset to default view when modal opens/closes
   useEffect(() => {
     if (!open) {
@@ -98,9 +161,11 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
       setActiveTab(null);
       setLoadingTab(null);
       setShowTabManagement(false);
+      setShowAdvancedOptions(false);
     } else {
       // When opening, set to null to show the main view
       setActiveTab(null);
+      setShowAdvancedOptions(false);
     }
   }, [open]);
 
@@ -109,6 +174,7 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
     setActiveTab(null);
     setLoadingTab(null);
     setShowTabManagement(false);
+    setShowAdvancedOptions(false);
     onClose();
   };
 
@@ -304,33 +370,47 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
                     {activeTab ? (
                       getTabComponent(activeTab)
                     ) : (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 relative">
-                        {visibleTabs.map((tab, index) => (
-                          <div
-                            key={tab.id}
-                            className={classNames(
-                              'aspect-[1.5/1] transition-transform duration-100 ease-out',
-                              'hover:scale-[1.01]',
+                      <div className="space-y-6">
+                        <div>
+                          <h3 className="text-sm font-medium text-bolt-elements-textSecondary mb-3">Integrations</h3>
+                          <TabGrid
+                            tabs={primaryTabs}
+                            open={open}
+                            activeTab={activeTab}
+                            loadingTab={loadingTab}
+                            onTabClick={handleTabClick}
+                            getTabUpdateStatus={getTabUpdateStatus}
+                            getStatusMessage={getStatusMessage}
+                          />
+                        </div>
+
+                        {advancedTabs.length > 0 && (
+                          <div className="border-t border-bolt-elements-borderColor pt-4">
+                            <div className="flex items-center justify-between gap-3 px-1 py-2">
+                              <div>
+                                <p className="text-sm font-medium text-bolt-elements-textPrimary">Advanced options</p>
+                                <p className="text-xs text-bolt-elements-textSecondary mt-0.5">
+                                  Providers, features, data, and developer tools
+                                </p>
+                              </div>
+                              <Switch checked={showAdvancedOptions} onCheckedChange={setShowAdvancedOptions} />
+                            </div>
+
+                            {showAdvancedOptions && (
+                              <div className="mt-3">
+                                <TabGrid
+                                  tabs={advancedTabs}
+                                  open={open}
+                                  activeTab={activeTab}
+                                  loadingTab={loadingTab}
+                                  onTabClick={handleTabClick}
+                                  getTabUpdateStatus={getTabUpdateStatus}
+                                  getStatusMessage={getStatusMessage}
+                                />
+                              </div>
                             )}
-                            style={{
-                              animationDelay: `${index * 30}ms`,
-                              animation: open ? 'fadeInUp 200ms ease-out forwards' : 'none',
-                            }}
-                          >
-                            <TabTile
-                              tab={tab}
-                              onClick={() => handleTabClick(tab.id as TabType)}
-                              isActive={activeTab === tab.id}
-                              hasUpdate={getTabUpdateStatus(tab.id)}
-                              statusMessage={getStatusMessage(tab.id)}
-                              description={TAB_DESCRIPTIONS[tab.id]}
-                              isLoading={loadingTab === tab.id}
-                              className="h-full relative"
-                            >
-                              {BETA_TABS.has(tab.id) && <BetaLabel />}
-                            </TabTile>
                           </div>
-                        ))}
+                        )}
                       </div>
                     )}
                   </div>

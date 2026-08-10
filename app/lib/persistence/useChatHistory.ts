@@ -22,6 +22,7 @@ import type { Snapshot } from './types';
 import { webcontainer } from '~/lib/webcontainer';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
+import { APP_NAME } from '~/utils/brand';
 
 export interface ChatHistoryItem {
   id: string;
@@ -130,7 +131,7 @@ export function useChatHistory() {
                   role: 'assistant',
 
                   // Combine followup message and the artifact with files and command actions
-                  content: `Bolt Restored your chat from a snapshot. You can revert this message to load the full chat history.
+                  content: `${APP_NAME} restored your chat from a snapshot. You can revert this message to load the full chat history.
                   <boltArtifact id="restored-project-setup" title="Restored Project & Setup" type="bundled">
                   ${Object.entries(snapshot?.files || {})
                     .map(([key, value]) => {
@@ -349,7 +350,8 @@ ${value.content}
 
       try {
         const newId = await duplicateChat(db, mixedId || listItemId);
-        navigate(`/chat/${newId}`);
+        const base = window.location.pathname.startsWith('/studio') ? '/studio/chat' : '/chat';
+        navigate(`${base}/${newId}`);
         toast.success('Chat duplicated successfully');
       } catch (error) {
         toast.error('Failed to duplicate chat');
@@ -363,7 +365,8 @@ ${value.content}
 
       try {
         const newId = await createChatFromMessages(db, description, messages, metadata);
-        window.location.href = `/chat/${newId}`;
+        const base = window.location.pathname.startsWith('/studio') ? '/studio/chat' : '/chat';
+        window.location.href = `${base}/${newId}`;
         toast.success('Chat imported successfully');
       } catch (error) {
         if (error instanceof Error) {
@@ -405,7 +408,8 @@ function navigateChat(nextId: string) {
    * `navigate(`/chat/${nextId}`, { replace: true });`
    */
   const url = new URL(window.location.href);
-  url.pathname = `/chat/${nextId}`;
+  const isStudio = window.location.pathname.startsWith('/studio');
+  url.pathname = isStudio ? `/studio/chat/${nextId}` : `/chat/${nextId}`;
 
   window.history.replaceState({}, '', url);
 }

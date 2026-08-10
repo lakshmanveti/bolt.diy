@@ -54,7 +54,7 @@ const inlineThemeCode = stripIndents`
     let theme = localStorage.getItem('bolt_theme');
 
     if (!theme) {
-      theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      theme = 'dark';
     }
 
     document.querySelector('html')?.setAttribute('data-theme', theme);
@@ -80,7 +80,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   return (
     <>
-      <ClientOnly>{() => <DndProvider backend={HTML5Backend}>{children}</DndProvider>}</ClientOnly>
+      {/*
+        Must render `children` on the server. Wrapping Outlet in ClientOnly with no
+        fallback produced an empty document (Toastify only) and a blank browser.
+      */}
+      <ClientOnly fallback={children}>
+        {() => <DndProvider backend={HTML5Backend}>{children}</DndProvider>}
+      </ClientOnly>
       <ToastContainer
         closeButton={({ closeToast }) => {
           return (

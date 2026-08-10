@@ -4,6 +4,7 @@ import type { Template } from '~/types/template';
 export const WORK_DIR_NAME = 'project';
 export const WORK_DIR = `/home/${WORK_DIR_NAME}`;
 export const MODIFICATIONS_TAG_NAME = 'bolt_file_modifications';
+export { APP_NAME, APP_NAME_STUDIO, APP_DESCRIPTION, APP_HERO_TITLE, APP_HERO_SUBTITLE, APP_CHAT_PLACEHOLDER, APP_USER_AGENT } from './brand';
 export const MODEL_REGEX = /^\[Model: (.*?)\]\n\n/;
 export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
 export const DEFAULT_MODEL = 'claude-3-5-sonnet-latest';

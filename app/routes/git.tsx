@@ -5,9 +5,13 @@ import { BaseChat } from '~/components/chat/BaseChat';
 import { GitUrlImport } from '~/components/git/GitUrlImport.client';
 import { Header } from '~/components/header/Header';
 import BackgroundRays from '~/components/ui/BackgroundRays';
+import { APP_NAME } from '~/utils/brand';
 
 export const meta: MetaFunction = () => {
-  return [{ title: 'Bolt' }, { name: 'description', content: 'Talk with Bolt, an AI assistant from StackBlitz' }];
+  return [
+    { title: APP_NAME },
+    { name: 'description', content: `Talk with ${APP_NAME}, an AI assistant that builds apps from chat` },
+  ];
 };
 
 export async function loader(args: LoaderFunctionArgs) {

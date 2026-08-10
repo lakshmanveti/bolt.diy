@@ -2,6 +2,7 @@ import ignore from 'ignore';
 import type { ProviderInfo } from '~/types/model';
 import type { Template } from '~/types/template';
 import { STARTER_TEMPLATES } from './constants';
+import { APP_NAME } from './brand';
 
 const starterTemplateSelectionPrompt = (templates: Template[]) => `
 You are an experienced developer who helps people choose the best starter template for their projects.
@@ -184,7 +185,7 @@ export async function getTemplates(templateName: string, title?: string) {
   }
 
   const assistantMessage = `
-Bolt is initializing your project with the required files using the ${template.name} template.
+${APP_NAME} is initializing your project with the required files using the ${template.name} template.
 <boltArtifact id="imported-files" title="${title || 'Create initial files'}" type="bundled">
 ${filesToImport.files
   .map(

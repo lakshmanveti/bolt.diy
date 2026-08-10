@@ -11,6 +11,7 @@ import { chatId } from '~/lib/persistence/useChatHistory';
 import { useStore } from '@nanostores/react';
 import { GitHubAuthDialog } from '~/components/@settings/tabs/github/components/GitHubAuthDialog';
 import { SearchInput, EmptyState, StatusIndicator, Badge } from '~/components/ui';
+import { APP_NAME } from '~/utils/brand';
 
 interface GitHubDeploymentDialogProps {
   isOpen: boolean;
@@ -406,7 +407,7 @@ export function GitHubDeploymentDialog({ isOpen, onClose, projectName, files }: 
         const { data: commitData } = await octokit.git.createCommit({
           owner: connection.user.login,
           repo: sanitizedRepoName,
-          message: !repoExists ? 'Initial commit from Bolt.diy' : 'Update from Bolt.diy',
+          message: !repoExists ? `Initial commit from ${APP_NAME}` : `Update from ${APP_NAME}`,
           tree: treeData.sha,
           parents: parentCommitSha ? [parentCommitSha] : [], // Use parent if available
         });

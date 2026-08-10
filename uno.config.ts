@@ -1,3 +1,5 @@
+import { icons as phIcons } from '@iconify-json/ph';
+import { icons as svgSpinnersIcons } from '@iconify-json/svg-spinners';
 import { globSync } from 'fast-glob';
 import fs from 'node:fs/promises';
 import { basename } from 'node:path';
@@ -241,6 +243,10 @@ export default defineConfig({
       warn: true,
       collections: {
         ...customIconCollection,
+        // Loader functions are required: a plain IconifyJSON object is treated as a
+        // name→svg map, so Phosphor/svg-spinners never resolve via auto-import under pnpm.
+        ph: () => phIcons,
+        'svg-spinners': () => svgSpinnersIcons,
       },
       unit: 'em',
     }),

@@ -1,4 +1,6 @@
 // Simple EventEmitter implementation for browser compatibility
+import { APP_NAME } from '~/utils/brand';
+
 class SimpleEventEmitter {
   private _events: Record<string, ((...args: any[]) => void)[]> = {};
 
@@ -314,7 +316,7 @@ export class LocalModelHealthMonitor extends SimpleEventEmitter {
           isHealthy: false,
           responseTime: 0,
           error:
-            'CORS_ERROR: LM Studio server is blocking cross-origin requests. Try enabling CORS in LM Studio settings or use Bolt desktop app.',
+            `CORS_ERROR: LM Studio server is blocking cross-origin requests. Try enabling CORS in LM Studio settings or use the ${APP_NAME} desktop app.`,
         };
       }
 

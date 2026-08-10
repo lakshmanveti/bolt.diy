@@ -12,6 +12,8 @@ import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROMPT_COOKIE_KEY, PROVIDER_LIST } fro
 import { cubicEasingFn } from '~/utils/easings';
 import { createScopedLogger, renderLogger } from '~/utils/logger';
 import { BaseChat } from './BaseChat';
+import { ConsumerShell } from '~/components/consumer/ConsumerShell';
+import { consumerUiMode } from '~/lib/consumer/mode';
 import Cookies from 'js-cookie';
 import { debounce } from '~/utils/debounce';
 import { useSettings } from '~/lib/hooks/useSettings';
@@ -111,6 +113,7 @@ export const ChatImpl = memo(
       return (PROVIDER_LIST.find((p) => p.name === savedProvider) || DEFAULT_PROVIDER) as ProviderInfo;
     });
     const { showChat } = useStore(chatStore);
+    const uiMode = useStore(consumerUiMode);
     const [animationScope, animate] = useAnimate();
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
     const [chatMode, setChatMode] = useState<'discuss' | 'build'>('build');
@@ -323,14 +326,18 @@ export const ChatImpl = memo(
         return;
       }
 
-      await Promise.all([
-        animate('#examples', { opacity: 0, display: 'none' }, { duration: 0.1 }),
-        animate('#intro', { opacity: 0, flex: 1 }, { duration: 0.2, ease: cubicEasingFn }),
-      ]);
-
+      // Switch into conversation UI immediately — do not wait on DOM animations
       chatStore.setKey('started', true);
-
       setChatStarted(true);
+
+      try {
+        await Promise.all([
+          animate('#examples', { opacity: 0, display: 'none' }, { duration: 0.1 }),
+          animate('#intro', { opacity: 0, flex: 1 }, { duration: 0.2, ease: cubicEasingFn }),
+        ]);
+      } catch {
+        // Consumer shell (and some layouts) may not include #intro / #examples
+      }
     };
 
     // Helper function to create message parts array from text and images
@@ -608,8 +615,10 @@ export const ChatImpl = memo(
       [input, handleInputChange],
     );
 
+    const Shell = uiMode === 'studio' ? BaseChat : ConsumerShell;
+
     return (
-      <BaseChat
+      <Shell
         ref={animationScope}
         textareaRef={textareaRef}
         input={input}

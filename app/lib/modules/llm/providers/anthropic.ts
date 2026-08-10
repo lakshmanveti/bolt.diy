@@ -3,6 +3,7 @@ import type { ModelInfo } from '~/lib/modules/llm/types';
 import type { LanguageModelV1 } from 'ai';
 import type { IProviderSetting } from '~/types/model';
 import { createAnthropic } from '@ai-sdk/anthropic';
+import { createSamplingParamStrippingFetch } from '~/lib/modules/llm/fetch-without-sampling';
 
 export default class AnthropicProvider extends BaseProvider {
   name = 'Anthropic';
@@ -101,6 +102,12 @@ export default class AnthropicProvider extends BaseProvider {
         maxCompletionTokens = 32000; // Other Claude 4 models: conservative 32K limit
       }
 
+      // Claude Sonnet 5 / newer models — large context + completion
+      if (m.id?.includes('claude-sonnet-5') || m.id?.includes('sonnet-5')) {
+        contextWindow = Math.max(contextWindow, 200000);
+        maxCompletionTokens = 128000;
+      }
+
       return {
         name: m.id,
         label: `${m.display_name} (${Math.floor(contextWindow / 1000)}k context)`,
@@ -128,6 +135,7 @@ export default class AnthropicProvider extends BaseProvider {
     const anthropic = createAnthropic({
       apiKey,
       headers: { 'anthropic-beta': 'output-128k-2025-02-19' },
+      fetch: createSamplingParamStrippingFetch(model),
     });
 
     return anthropic(model);

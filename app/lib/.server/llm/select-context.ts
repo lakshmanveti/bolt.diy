@@ -6,6 +6,7 @@ import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROVIDER_LIST } from '~/utils/constant
 import { createFilesContext, extractCurrentContext, extractPropertiesFromMessage, simplifyBoltActions } from './utils';
 import { createScopedLogger } from '~/utils/logger';
 import { LLMManager } from '~/lib/modules/llm/manager';
+import { APP_NAME } from '~/utils/brand';
 
 // Common patterns to ignore, similar to .gitignore
 
@@ -225,7 +226,7 @@ export async function selectContext(props: {
   logger.info(`Total files: ${totalFiles}`);
 
   if (totalFiles == 0) {
-    throw new Error(`Bolt failed to select files`);
+    throw new Error(`${APP_NAME} failed to select files`);
   }
 
   return filteredFiles;

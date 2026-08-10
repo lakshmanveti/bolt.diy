@@ -89,20 +89,23 @@ export const TAB_DESCRIPTIONS: Record<TabType, string> = {
   mcp: 'Configure MCP (Model Context Protocol) servers',
 };
 
+/** Shown on the Control Panel home by default (Configure integrations). */
+export const PRIMARY_INTEGRATION_TABS: TabType[] = ['github', 'gitlab', 'netlify', 'vercel', 'supabase'];
+
 export const DEFAULT_TAB_CONFIG = [
-  // User Window Tabs (Always visible by default)
-  { id: 'features', visible: true, window: 'user' as const, order: 0 },
-  { id: 'data', visible: true, window: 'user' as const, order: 1 },
-  { id: 'cloud-providers', visible: true, window: 'user' as const, order: 2 },
-  { id: 'local-providers', visible: true, window: 'user' as const, order: 3 },
-  { id: 'github', visible: true, window: 'user' as const, order: 4 },
-  { id: 'gitlab', visible: true, window: 'user' as const, order: 5 },
-  { id: 'netlify', visible: true, window: 'user' as const, order: 6 },
-  { id: 'vercel', visible: true, window: 'user' as const, order: 7 },
-  { id: 'supabase', visible: true, window: 'user' as const, order: 8 },
+  // Primary integrations (always prominent)
+  { id: 'github', visible: true, window: 'user' as const, order: 0 },
+  { id: 'gitlab', visible: true, window: 'user' as const, order: 1 },
+  { id: 'netlify', visible: true, window: 'user' as const, order: 2 },
+  { id: 'vercel', visible: true, window: 'user' as const, order: 3 },
+  { id: 'supabase', visible: true, window: 'user' as const, order: 4 },
+
+  // Advanced options (collapsed by default in the Control Panel UI)
+  { id: 'features', visible: true, window: 'user' as const, order: 5 },
+  { id: 'data', visible: true, window: 'user' as const, order: 6 },
+  { id: 'cloud-providers', visible: true, window: 'user' as const, order: 7 },
+  { id: 'local-providers', visible: true, window: 'user' as const, order: 8 },
   { id: 'notifications', visible: true, window: 'user' as const, order: 9 },
   { id: 'event-logs', visible: true, window: 'user' as const, order: 10 },
   { id: 'mcp', visible: true, window: 'user' as const, order: 11 },
-
-  // User Window Tabs (In dropdown, initially hidden)
 ];

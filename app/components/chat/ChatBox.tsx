@@ -20,6 +20,7 @@ import type { DesignScheme } from '~/types/design-scheme';
 import type { ElementInfo } from '~/components/workbench/Inspector';
 import { McpTools } from './MCPTools';
 import { WebSearch } from './WebSearch.client';
+import { APP_CHAT_PLACEHOLDER } from '~/utils/brand';
 
 interface ChatBoxProps {
   isModelSettingsCollapsed: boolean;
@@ -63,6 +64,8 @@ interface ChatBoxProps {
   setDesignScheme?: (scheme: DesignScheme) => void;
   selectedElement?: ElementInfo | null;
   setSelectedElement?: ((element: ElementInfo | null) => void) | undefined;
+  /** Consumer UI: attachment + voice only. Studio keeps the full toolbar. */
+  toolbarMode?: 'full' | 'minimal';
 }
 
 export const ChatBox: React.FC<ChatBoxProps> = (props) => {
@@ -154,14 +157,14 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
       </ClientOnly>
       {props.selectedElement && (
         <div className="flex mx-1.5 gap-2 items-center justify-between rounded-lg rounded-b-none border border-b-none border-bolt-elements-borderColor text-bolt-elements-textPrimary flex py-1 px-2.5 font-medium text-xs">
-          <div className="flex gap-2 items-center lowercase">
-            <code className="bg-accent-500 rounded-4px px-1.5 py-1 mr-0.5 text-white">
+          <div className="flex gap-2 items-center lowercase min-w-0">
+            <code className="bg-accent-500 rounded-4px px-1.5 py-1 mr-0.5 text-white shrink-0">
               {props?.selectedElement?.tagName}
             </code>
-            selected for inspection
+            <span className="truncate">selected — describe the change</span>
           </div>
           <button
-            className="bg-transparent text-accent-500 pointer-auto"
+            className="bg-transparent text-accent-500 pointer-auto shrink-0"
             onClick={() => props.setSelectedElement?.(null)}
           >
             Clear
@@ -238,7 +241,7 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
             minHeight: props.TEXTAREA_MIN_HEIGHT,
             maxHeight: props.TEXTAREA_MAX_HEIGHT,
           }}
-          placeholder={props.chatMode === 'build' ? 'How can Bolt help you today?' : 'What would you like to discuss?'}
+          placeholder={props.chatMode === 'build' ? APP_CHAT_PLACEHOLDER : 'What would you like to discuss?'}
           translate="no"
         />
         <ClientOnly>
@@ -262,27 +265,35 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
         </ClientOnly>
         <div className="flex justify-between items-center text-sm p-4 pt-2">
           <div className="flex gap-1 items-center">
-            <ColorSchemeDialog designScheme={props.designScheme} setDesignScheme={props.setDesignScheme} />
-            <McpTools />
+            {props.toolbarMode !== 'minimal' && (
+              <>
+                <ColorSchemeDialog designScheme={props.designScheme} setDesignScheme={props.setDesignScheme} />
+                <McpTools />
+              </>
+            )}
             <IconButton title="Upload file" className="transition-all" onClick={() => props.handleFileUpload()}>
               <div className="i-ph:paperclip text-xl"></div>
             </IconButton>
-            <WebSearch onSearchResult={(result) => props.onWebSearchResult?.(result)} disabled={props.isStreaming} />
-            <IconButton
-              title="Enhance prompt"
-              disabled={props.input.length === 0 || props.enhancingPrompt}
-              className={classNames('transition-all', props.enhancingPrompt ? 'opacity-100' : '')}
-              onClick={() => {
-                props.enhancePrompt?.();
-                toast.success('Prompt enhanced!');
-              }}
-            >
-              {props.enhancingPrompt ? (
-                <div className="i-svg-spinners:90-ring-with-bg text-bolt-elements-loader-progress text-xl animate-spin"></div>
-              ) : (
-                <div className="i-bolt:stars text-xl"></div>
-              )}
-            </IconButton>
+            {props.toolbarMode !== 'minimal' && (
+              <>
+                <WebSearch onSearchResult={(result) => props.onWebSearchResult?.(result)} disabled={props.isStreaming} />
+                <IconButton
+                  title="Enhance prompt"
+                  disabled={props.input.length === 0 || props.enhancingPrompt}
+                  className={classNames('transition-all', props.enhancingPrompt ? 'opacity-100' : '')}
+                  onClick={() => {
+                    props.enhancePrompt?.();
+                    toast.success('Prompt enhanced!');
+                  }}
+                >
+                  {props.enhancingPrompt ? (
+                    <div className="i-svg-spinners:90-ring-with-bg text-bolt-elements-loader-progress text-xl animate-spin"></div>
+                  ) : (
+                    <div className="i-bolt:stars text-xl"></div>
+                  )}
+                </IconButton>
+              </>
+            )}
 
             <SpeechRecognitionButton
               isListening={props.isListening}
@@ -292,7 +303,11 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
             />
             {props.chatStarted && (
               <IconButton
-                title="Discuss"
+                title={
+                  props.chatMode === 'discuss'
+                    ? 'Ask mode: answers and plans only (no app changes)'
+                    : 'Build mode: implements changes in your app'
+                }
                 className={classNames(
                   'transition-all flex items-center gap-1 px-1.5',
                   props.chatMode === 'discuss'
@@ -303,24 +318,26 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
                   props.setChatMode?.(props.chatMode === 'discuss' ? 'build' : 'discuss');
                 }}
               >
-                <div className={`i-ph:chats text-xl`} />
-                {props.chatMode === 'discuss' ? <span>Discuss</span> : <span />}
+                <div className={props.chatMode === 'discuss' ? 'i-ph:chats text-xl' : 'i-ph:hammer text-xl'} />
+                <span className="text-xs">{props.chatMode === 'discuss' ? 'Ask' : 'Build'}</span>
               </IconButton>
             )}
-            <IconButton
-              title="Model Settings"
-              className={classNames('transition-all flex items-center gap-1', {
-                'bg-bolt-elements-item-backgroundAccent text-bolt-elements-item-contentAccent':
-                  props.isModelSettingsCollapsed,
-                'bg-bolt-elements-item-backgroundDefault text-bolt-elements-item-contentDefault':
-                  !props.isModelSettingsCollapsed,
-              })}
-              onClick={() => props.setIsModelSettingsCollapsed(!props.isModelSettingsCollapsed)}
-              disabled={!props.providerList || props.providerList.length === 0}
-            >
-              <div className={`i-ph:caret-${props.isModelSettingsCollapsed ? 'right' : 'down'} text-lg`} />
-              {props.isModelSettingsCollapsed ? <span className="text-xs">{props.model}</span> : <span />}
-            </IconButton>
+            {props.toolbarMode !== 'minimal' && (
+              <IconButton
+                title="Model Settings"
+                className={classNames('transition-all flex items-center gap-1', {
+                  'bg-bolt-elements-item-backgroundAccent text-bolt-elements-item-contentAccent':
+                    props.isModelSettingsCollapsed,
+                  'bg-bolt-elements-item-backgroundDefault text-bolt-elements-item-contentDefault':
+                    !props.isModelSettingsCollapsed,
+                })}
+                onClick={() => props.setIsModelSettingsCollapsed(!props.isModelSettingsCollapsed)}
+                disabled={!props.providerList || props.providerList.length === 0}
+              >
+                <div className={`i-ph:caret-${props.isModelSettingsCollapsed ? 'right' : 'down'} text-lg`} />
+                {props.isModelSettingsCollapsed ? <span className="text-xs">{props.model}</span> : <span />}
+              </IconButton>
+            )}
           </div>
           {props.input.length > 3 ? (
             <div className="text-xs text-bolt-elements-textTertiary">
@@ -328,7 +345,7 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
               <kbd className="kdb px-1.5 py-0.5 rounded bg-bolt-elements-background-depth-2">Return</kbd> a new line
             </div>
           ) : null}
-          <SupabaseConnection />
+          {props.toolbarMode !== 'minimal' && <SupabaseConnection />}
           <ExpoQrModal open={props.qrModalOpen} onClose={() => props.setQrModalOpen(false)} />
         </div>
       </div>

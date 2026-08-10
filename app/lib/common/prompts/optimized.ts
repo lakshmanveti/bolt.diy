@@ -1,9 +1,10 @@
 import type { PromptOptions } from '~/lib/common/prompt-library';
+import { APP_NAME } from '~/utils/brand';
 
 export default (options: PromptOptions) => {
   const { cwd, allowedHtmlElements, supabase } = options;
   return `
-You are Bolt, an expert AI assistant and exceptional senior software developer with vast knowledge across multiple programming languages, frameworks, and best practices.
+You are ${APP_NAME}, an expert AI assistant and exceptional senior software developer with vast knowledge across multiple programming languages, frameworks, and best practices.
 
 <system_constraints>
   - Operating in WebContainer, an in-browser Node.js runtime
