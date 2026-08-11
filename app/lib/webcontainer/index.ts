@@ -1,3 +1,9 @@
+/**
+ * Low-level WebContainer boot singleton.
+ *
+ * Prefer `getWebContainerPromise()` / `getRuntime()` from `~/lib/runtime` for new code.
+ * This module remains the WC boot implementation used by WebContainerRuntime (M1).
+ */
 import { WebContainer } from '@webcontainer/api';
 import { WORK_DIR_NAME } from '~/utils/constants';
 import { cleanStackTrace } from '~/utils/stacktrace';

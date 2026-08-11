@@ -10,6 +10,7 @@ import { DndProvider } from 'react-dnd';
 import { HTML5Backend } from 'react-dnd-html5-backend';
 import { ClientOnly } from 'remix-utils/client-only';
 import { cssTransition, ToastContainer } from 'react-toastify';
+import { RuntimeHealthPoller } from '~/components/runtime/RuntimeHealthPoller.client';
 
 import reactToastifyStyles from 'react-toastify/dist/ReactToastify.css?url';
 import globalStyles from './styles/index.scss?url';
@@ -85,7 +86,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
         fallback produced an empty document (Toastify only) and a blank browser.
       */}
       <ClientOnly fallback={children}>
-        {() => <DndProvider backend={HTML5Backend}>{children}</DndProvider>}
+        {() => (
+          <DndProvider backend={HTML5Backend}>
+            <RuntimeHealthPoller />
+            {children}
+          </DndProvider>
+        )}
       </ClientOnly>
       <ToastContainer
         closeButton={({ closeToast }) => {

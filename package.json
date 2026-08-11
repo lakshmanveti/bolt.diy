@@ -27,6 +27,8 @@
     "dockerbuild": "docker build -t bolt-ai:development -t bolt-ai:latest --target development .",
     "typecheck": "tsc",
     "typegen": "wrangler types",
+    "runtime:daemon": "node runtime-daemon/src/server.mjs",
+    "runtime:daemon:dev": "node --watch runtime-daemon/src/server.mjs",
     "preview": "pnpm run build && pnpm run start",
     "prepare": "husky",
     "clean": "node scripts/clean.js",

@@ -4,7 +4,8 @@ import { useChat } from '@ai-sdk/react';
 import { useAnimate } from 'framer-motion';
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
-import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
+import { resetMessageParser, useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
+import { getDockerRuntime } from '~/lib/runtime';
 import { description, useChatHistory } from '~/lib/persistence';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
@@ -13,12 +14,13 @@ import { cubicEasingFn } from '~/utils/easings';
 import { createScopedLogger, renderLogger } from '~/utils/logger';
 import { BaseChat } from './BaseChat';
 import { ConsumerShell } from '~/components/consumer/ConsumerShell';
+import { SessionRestoreLoader } from '~/components/consumer/SessionRestoreLoader';
 import { consumerUiMode } from '~/lib/consumer/mode';
 import Cookies from 'js-cookie';
 import { debounce } from '~/utils/debounce';
 import { useSettings } from '~/lib/hooks/useSettings';
 import type { ProviderInfo } from '~/types/model';
-import { useSearchParams } from '@remix-run/react';
+import { useLoaderData, useSearchParams } from '@remix-run/react';
 import { createSampler } from '~/utils/sampler';
 import { getTemplates, selectStarterTemplate } from '~/utils/selectStarterTemplate';
 import { logStore } from '~/lib/stores/logs';
@@ -36,11 +38,16 @@ const logger = createScopedLogger('Chat');
 export function Chat() {
   renderLogger.trace('Chat');
 
+  const { id: mixedId } = useLoaderData<{ id?: string }>() ?? {};
   const { ready, initialMessages, storeMessageHistory, importChat, exportChat } = useChatHistory();
   const title = useStore(description);
   useEffect(() => {
     workbenchStore.setReloadedMessages(initialMessages.map((m) => m.id));
   }, [initialMessages]);
+
+  if (!ready && mixedId) {
+    return <SessionRestoreLoader />;
+  }
 
   return (
     <>
@@ -66,6 +73,12 @@ const processSampledMessages = createSampler(
     storeMessageHistory: (messages: Message[]) => Promise<void>;
   }) => {
     const { messages, initialMessages, isLoading, parseMessages, storeMessageHistory } = options;
+
+    // Clear restore-skip before parsing new turns so follow-up file writes actually hit Docker
+    if (isLoading || messages.length > initialMessages.length) {
+      getDockerRuntime().setHydrateSkipWrites(false);
+    }
+
     parseMessages(messages, isLoading);
 
     if (messages.length > initialMessages.length) {
@@ -203,7 +216,16 @@ export const ChatImpl = memo(
       chatStore.setKey('started', initialMessages.length > 0);
     }, []);
 
+    const parsedChatKey = useRef<string | undefined>();
+
     useEffect(() => {
+      const key = initialMessages[0]?.id ?? 'new';
+
+      if (parsedChatKey.current !== key) {
+        parsedChatKey.current = key;
+        resetMessageParser();
+      }
+
       processSampledMessages({
         messages,
         initialMessages,
@@ -211,7 +233,7 @@ export const ChatImpl = memo(
         parseMessages,
         storeMessageHistory,
       });
-    }, [messages, isLoading, parseMessages]);
+    }, [messages, isLoading, parseMessages, initialMessages]);
 
     const scrollTextArea = () => {
       const textarea = textareaRef.current;

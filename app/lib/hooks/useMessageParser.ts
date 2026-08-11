@@ -54,23 +54,25 @@ const extractTextContent = (message: Message) =>
     ? (message.content.find((item) => item.type === 'text')?.text as string) || ''
     : message.content;
 
+export function resetMessageParser() {
+  messageParser.reset();
+}
+
 export function useMessageParser() {
   const [parsedMessages, setParsedMessages] = useState<{ [key: number]: string }>({});
 
-  const parseMessages = useCallback((messages: Message[], isLoading: boolean) => {
-    let reset = false;
-
-    if (import.meta.env.DEV && !isLoading) {
-      reset = true;
-      messageParser.reset();
-    }
-
+  const parseMessages = useCallback((messages: Message[], _isLoading: boolean) => {
+    /*
+     * Do not reset the parser after every stream. In DEV the old reset
+     * re-ran all bolt actions (files + start) and reloaded the Docker preview
+     * several times. Reset only when switching chats via resetMessageParser().
+     */
     for (const [index, message] of messages.entries()) {
       if (message.role === 'assistant' || message.role === 'user') {
         const newParsedContent = messageParser.parse(message.id, extractTextContent(message));
         setParsedMessages((prevParsed) => ({
           ...prevParsed,
-          [index]: !reset ? (prevParsed[index] || '') + newParsedContent : newParsedContent,
+          [index]: (prevParsed[index] || '') + newParsedContent,
         }));
       }
     }

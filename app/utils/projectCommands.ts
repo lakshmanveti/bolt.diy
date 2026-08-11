@@ -174,20 +174,26 @@ export function escapeBoltTags(input: string) {
 }
 
 // We have this seperate function to simplify the restore snapshot process in to one single artifact.
-export function createCommandActionsString(commands: ProjectCommands): string {
-  if (!commands.setupCommand && !commands.startCommand) {
+export function createCommandActionsString(
+  commands: ProjectCommands,
+  options?: { includeSetup?: boolean; includeStart?: boolean },
+): string {
+  const includeSetup = options?.includeSetup !== false;
+  const includeStart = options?.includeStart !== false;
+
+  if ((!includeSetup || !commands.setupCommand) && (!includeStart || !commands.startCommand)) {
     // Return empty string if no commands
     return '';
   }
 
   let commandString = '';
 
-  if (commands.setupCommand) {
+  if (includeSetup && commands.setupCommand) {
     commandString += `
 <boltAction type="shell">${commands.setupCommand}</boltAction>`;
   }
 
-  if (commands.startCommand) {
+  if (includeStart && commands.startCommand) {
     commandString += `
 <boltAction type="start">${commands.startCommand}</boltAction>
 `;

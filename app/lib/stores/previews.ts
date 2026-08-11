@@ -167,6 +167,14 @@ export class PreviewsStore {
   }
 
   async #init() {
+    // Always listen to WebContainer ports (default path / fallback)
+    void this.#initWebContainerPreviews();
+
+    // Also listen to Docker runtime previews when that target is active
+    void this.#initDockerPreviews();
+  }
+
+  async #initWebContainerPreviews() {
     const webcontainer = await this.#webcontainer;
 
     // Listen for server ready events
@@ -208,10 +216,83 @@ export class PreviewsStore {
     });
   }
 
-  // Helper to extract preview ID from URL
+  async #initDockerPreviews() {
+    try {
+      const { getDockerRuntime } = await import('~/lib/runtime');
+      const runtime = getDockerRuntime();
+
+      runtime.onPreview((preview) => {
+        const port = preview.port;
+        const isLocalhost =
+          preview.baseUrl.includes('127.0.0.1') || preview.baseUrl.includes('localhost');
+
+        /*
+         * Docker maps random host ports per container. Keep only the latest
+         * localhost preview so the iframe does not stick on a dead old port.
+         */
+        if (preview.ready && isLocalhost) {
+          for (const [existingPort, info] of this.#availablePreviews) {
+            if (
+              existingPort !== port &&
+              (info.baseUrl.includes('127.0.0.1') || info.baseUrl.includes('localhost'))
+            ) {
+              this.#availablePreviews.delete(existingPort);
+            }
+          }
+        }
+
+        const nextPreviews = this.previews
+          .get()
+          .filter(
+            (p) =>
+              p.port === port ||
+              !(p.baseUrl.includes('127.0.0.1') || p.baseUrl.includes('localhost')),
+          )
+          .filter((p) => p.port !== port);
+
+        const previewInfo: PreviewInfo = {
+          port,
+          ready: preview.ready,
+          baseUrl: preview.baseUrl,
+        };
+        const previous = this.#availablePreviews.get(port);
+
+        if (previous?.baseUrl === previewInfo.baseUrl && previous.ready === previewInfo.ready) {
+          return;
+        }
+
+        this.#availablePreviews.set(port, previewInfo);
+        nextPreviews.push(previewInfo);
+        this.previews.set(nextPreviews);
+
+        if (preview.ready) {
+          console.log('[Preview] Docker preview ready:', preview.baseUrl);
+        }
+      });
+    } catch (error) {
+      console.warn('[Preview] Docker preview listener unavailable:', error);
+    }
+  }
+
+  // Helper to extract preview ID from URL (WebContainer or Docker localhost)
   getPreviewId(url: string): string | null {
-    const match = url.match(/^https?:\/\/([^.]+)\.local-credentialless\.webcontainer-api\.io/);
-    return match ? match[1] : null;
+    const wcMatch = url.match(/^https?:\/\/([^.]+)\.local-credentialless\.webcontainer-api\.io/);
+
+    if (wcMatch) {
+      return wcMatch[1];
+    }
+
+    try {
+      const parsed = new URL(url);
+
+      if (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost') {
+        return `local-${parsed.port || '80'}`;
+      }
+    } catch {
+      // ignore
+    }
+
+    return null;
   }
 
   // Broadcast state change to all tabs
@@ -269,6 +350,15 @@ export class PreviewsStore {
       const preview = previews.find((p) => this.getPreviewId(p.baseUrl) === previewId);
 
       if (preview) {
+        const isDockerLocal =
+          preview.baseUrl.includes('127.0.0.1') || preview.baseUrl.includes('localhost');
+
+        if (isDockerLocal) {
+          // URL stays stable; iframe reload is driven by dockerPreviewReloadToken
+          this.#refreshTimeouts.delete(previewId);
+          return;
+        }
+
         preview.ready = false;
         this.previews.set([...previews]);
 
@@ -292,6 +382,7 @@ export class PreviewsStore {
 
       if (previewId) {
         this.broadcastFileChange(previewId);
+        this.refreshPreview(previewId);
       }
     }
   }

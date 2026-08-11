@@ -3,11 +3,46 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import type { ProgressAnnotation } from '~/types/context';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { dockerPreviewReloadToken } from '~/lib/runtime';
 import { classNames } from '~/utils/classNames';
 import { Inspector, type ElementInfo } from '~/components/workbench/Inspector';
 import { BuildProgress } from './BuildProgress';
 import { ConsumerDeployButton } from './ConsumerDeployButton';
 
+/**
+ * Prefer direct Docker host ports over /embed proxies.
+ * Vite serves absolute URLs (/@react-refresh, /node_modules/...) that break under a path prefix.
+ * CORP headers on the preview server allow COEP iframes to load direct URLs.
+ */
+function withPreviewCacheBust(baseUrl: string, bust: number): string {
+  try {
+    const url = new URL(baseUrl);
+    url.searchParams.set('_bl', String(bust));
+    return url.toString();
+  } catch {
+    return baseUrl;
+  }
+}
+
+function toEmbeddablePreviewUrl(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    const embedMatch = url.pathname.match(/^\/embed\/(\d+)\/?(.*)$/);
+
+    if (
+      (url.hostname === '127.0.0.1' || url.hostname === 'localhost') &&
+      (url.port === '7788' || url.port === '') &&
+      embedMatch
+    ) {
+      const rest = embedMatch[2] ? `/${embedMatch[2]}` : '/';
+      return `http://127.0.0.1:${embedMatch[1]}${rest}${url.search}`;
+    }
+
+    return baseUrl;
+  } catch {
+    return baseUrl;
+  }
+}
 interface AppPreviewProps {
   annotations?: ProgressAnnotation[];
   isStreaming?: boolean;
@@ -186,10 +221,13 @@ function MobileFrame({
         >
           <iframe
             ref={iframeRef}
+            key={src}
             className="h-full w-full border-none bg-white"
             src={src}
             title="App preview (mobile)"
             allow="cross-origin-isolated"
+            // @ts-expect-error credentialless is valid for COEP iframes
+            credentialless=""
           />
         </div>
 
@@ -213,7 +251,10 @@ function MobileFrame({
 export const AppPreview = memo(
   ({ annotations = [], isStreaming = false, setSelectedElement, promptSummary }: AppPreviewProps) => {
     const previews = useStore(workbenchStore.previews);
+    const reloadToken = useStore(dockerPreviewReloadToken);
     const iframeRef = useRef<HTMLIFrameElement>(null);
+    const [previewBust, setPreviewBust] = useState(() => Date.now());
+    const hasSelectedPreview = useRef(false);
     const [activeIndex, setActiveIndex] = useState(0);
     const [mobileView, setMobileView] = useState(false);
     const [landscape, setLandscape] = useState(false);
@@ -229,10 +270,21 @@ export const AppPreview = memo(
         return;
       }
 
+      // Prefer newest ready preview (Docker host ports change each start)
+      if (!hasSelectedPreview.current) {
+        setActiveIndex(readyPreviews.length - 1);
+        return;
+      }
+
       if (activeIndex >= readyPreviews.length) {
-        setActiveIndex(0);
+        setActiveIndex(Math.max(0, readyPreviews.length - 1));
       }
     }, [readyPreviews, activeIndex]);
+
+    const selectPreview = useCallback((index: number) => {
+      hasSelectedPreview.current = true;
+      setActiveIndex(index);
+    }, []);
 
     useEffect(() => {
       workbenchStore.currentView.set('preview');
@@ -275,14 +327,19 @@ export const AppPreview = memo(
     }, [inspectorMode, postInspectorState, mobileView]);
 
     const active = readyPreviews[activeIndex] ?? readyPreviews[0];
+    const embedUrl = active?.baseUrl ? toEmbeddablePreviewUrl(active.baseUrl) : undefined;
+
+    useEffect(() => {
+      if (reloadToken > 0) {
+        setPreviewBust(Date.now());
+      }
+    }, [reloadToken]);
+
+    const iframeSrc = embedUrl ? withPreviewCacheBust(embedUrl, previewBust) : undefined;
 
     const reload = useCallback(() => {
-      if (!iframeRef.current || !active?.baseUrl) {
-        return;
-      }
-
-      iframeRef.current.src = active.baseUrl;
-    }, [active?.baseUrl]);
+      setPreviewBust(Date.now());
+    }, []);
 
     const toggleInspector = useCallback(() => {
       setInspectorMode((prev) => {
@@ -301,8 +358,8 @@ export const AppPreview = memo(
       <PreviewToolbar
         readyPreviews={readyPreviews}
         activeIndex={activeIndex}
-        setActiveIndex={setActiveIndex}
-        activeBaseUrl={active?.baseUrl}
+        setActiveIndex={selectPreview}
+        activeBaseUrl={embedUrl}
         onReload={reload}
         mobileView={mobileView}
         onToggleMobile={() => setMobileView((v) => !v)}
@@ -335,14 +392,17 @@ export const AppPreview = memo(
           )}
 
           {mobileView ? (
-            <MobileFrame src={active.baseUrl} iframeRef={iframeRef} landscape={landscape} />
+            <MobileFrame src={iframeSrc!} iframeRef={iframeRef} landscape={landscape} />
           ) : (
             <iframe
               ref={iframeRef}
+              key={iframeSrc}
               className="h-full w-full border-none bg-white"
-              src={active.baseUrl}
+              src={iframeSrc}
               title="App preview"
               allow="cross-origin-isolated"
+              // @ts-expect-error credentialless is valid for COEP iframes
+              credentialless=""
             />
           )}
 

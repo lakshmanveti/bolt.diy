@@ -1,0 +1,14 @@
+{
+  "name": "buildlive-runtime-daemon",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Local Docker runtime daemon for BuildLive (M3)",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  }
+}

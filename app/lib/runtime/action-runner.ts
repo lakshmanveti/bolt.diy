@@ -6,8 +6,31 @@ import { createScopedLogger } from '~/utils/logger';
 import { unreachable } from '~/utils/unreachable';
 import type { ActionCallbackData } from './message-parser';
 import type { BoltShell } from '~/utils/shell';
+import { getEffectiveExecutionTarget, getExecutionRuntime, type DockerRuntime } from '~/lib/runtime';
 
 const logger = createScopedLogger('ActionRunner');
+
+function isDockerExecution() {
+  return getEffectiveExecutionTarget() === 'docker';
+}
+
+function getDockerRuntimeForActions(): DockerRuntime {
+  return getExecutionRuntime() as DockerRuntime;
+}
+
+async function bindDockerSession() {
+  if (!isDockerExecution()) {
+    return;
+  }
+
+  // Dynamic import avoids circular init with useChatHistory → workbench → ActionRunner
+  const { chatId } = await import('~/lib/persistence/useChatHistory');
+  const id = chatId.get();
+
+  if (id) {
+    await getDockerRuntimeForActions().ensureSession?.(id);
+  }
+}
 
 export type ActionStatus = 'pending' | 'running' | 'complete' | 'aborted' | 'failed';
 
@@ -252,19 +275,35 @@ export class ActionRunner {
       unreachable('Expected shell action');
     }
 
-    const shell = this.#shellTerminal();
-    await shell.ready();
-
-    if (!shell || !shell.terminal || !shell.process) {
-      unreachable('Shell terminal not found');
-    }
-
     // Pre-validate command for common issues
     const validationResult = await this.#validateShellCommand(action.content);
 
     if (validationResult.shouldModify && validationResult.modifiedCommand) {
       logger.debug(`Modified command: ${action.content} -> ${validationResult.modifiedCommand}`);
       action.content = validationResult.modifiedCommand;
+    }
+
+    if (isDockerExecution()) {
+      await bindDockerSession();
+      const runtime = getDockerRuntimeForActions();
+      await runtime.ready();
+
+      const resp = await runtime.exec(action.content);
+      logger.debug(`${action.type} Docker Response: [exit code:${resp.exitCode}]`);
+
+      if (resp.exitCode != 0) {
+        const enhancedError = this.#createEnhancedShellError(action.content, resp.exitCode, resp.output);
+        throw new ActionCommandError(enhancedError.title, enhancedError.details);
+      }
+
+      return;
+    }
+
+    const shell = this.#shellTerminal();
+    await shell.ready();
+
+    if (!shell || !shell.terminal || !shell.process) {
+      unreachable('Shell terminal not found');
     }
 
     const resp = await shell.executeCommand(this.runnerId.get(), action.content, () => {
@@ -282,6 +321,21 @@ export class ActionRunner {
   async #runStartAction(action: ActionState) {
     if (action.type !== 'start') {
       unreachable('Expected shell action');
+    }
+
+    if (isDockerExecution()) {
+      await bindDockerSession();
+      const runtime = getDockerRuntimeForActions();
+      await runtime.ready();
+
+      try {
+        await runtime.start?.(action.content);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed To Start Application';
+        throw new ActionCommandError('Failed To Start Application', message);
+      }
+
+      return;
     }
 
     if (!this.#shellTerminal) {
@@ -311,6 +365,23 @@ export class ActionRunner {
   async #runFileAction(action: ActionState) {
     if (action.type !== 'file') {
       unreachable('Expected file action');
+    }
+
+    if (isDockerExecution()) {
+      await bindDockerSession();
+      const runtime = getDockerRuntimeForActions();
+      await runtime.ready();
+
+      const relativePath = action.filePath.replace(/^\/home\/project\//, '').replace(/^\//, '');
+
+      try {
+        await runtime.writeFile(relativePath, action.content);
+        logger.debug(`Docker file written ${relativePath}`);
+      } catch (error) {
+        logger.error('Failed to write file\n\n', error);
+      }
+
+      return;
     }
 
     const webcontainer = await this.#webcontainer;
@@ -580,6 +651,19 @@ export class ActionRunner {
     warning?: string;
   }> {
     const trimmedCommand = command.trim();
+
+    // Docker path: avoid WC filesystem probes; soften destructive rm
+    if (isDockerExecution()) {
+      if (trimmedCommand.startsWith('rm ') && !trimmedCommand.includes(' -f') && !trimmedCommand.includes(' -rf')) {
+        return {
+          shouldModify: true,
+          modifiedCommand: trimmedCommand.replace(/^rm\s+/, 'rm -f '),
+          warning: 'Added -f flag to rm command for Docker runtime',
+        };
+      }
+
+      return { shouldModify: false };
+    }
 
     // Handle rm commands that might fail due to missing files
     if (trimmedCommand.startsWith('rm ') && !trimmedCommand.includes(' -f')) {

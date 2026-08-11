@@ -2,7 +2,7 @@ import { atom, map, type MapStore, type ReadableAtom, type WritableAtom } from '
 import type { EditorDocument, ScrollPosition } from '~/components/editor/codemirror/CodeMirrorEditor';
 import { ActionRunner } from '~/lib/runtime/action-runner';
 import type { ActionCallbackData, ArtifactCallbackData } from '~/lib/runtime/message-parser';
-import { webcontainer } from '~/lib/webcontainer';
+import { getWebContainerPromise, getEffectiveExecutionTarget } from '~/lib/runtime';
 import type { ITerminal } from '~/types/terminal';
 import { unreachable } from '~/utils/unreachable';
 import { EditorStore } from './editor';
@@ -20,6 +20,9 @@ import { createSampler } from '~/utils/sampler';
 import type { ActionAlert, DeployAlert, SupabaseAlert } from '~/types/actions';
 
 const { saveAs } = fileSaver;
+
+/** M1: WC via runtime accessor (same promise as before when target=webcontainer). */
+const webcontainer = getWebContainerPromise();
 
 export interface ArtifactState {
   id: string;
@@ -561,6 +564,14 @@ export class WorkbenchStore {
       return;
     }
 
+    const isReloaded = this.#reloadedMessages.has(data.messageId);
+    const skipDockerReplay =
+      isReloaded && getEffectiveExecutionTarget() === 'docker';
+
+    if (skipDockerReplay && (data.action.type === 'start' || data.action.type === 'shell')) {
+      return;
+    }
+
     if (data.action.type === 'file') {
       const wc = await webcontainer;
       const fullPath = path.join(wc.workdir, data.action.filePath);
@@ -575,7 +586,8 @@ export class WorkbenchStore {
         this.setSelectedFile(fullPath);
       }
 
-      if (this.currentView.value !== 'code') {
+      // Docker consumer preview: don't flip to code on every file write (causes iframe remounts)
+      if (this.currentView.value !== 'code' && getEffectiveExecutionTarget() !== 'docker') {
         this.currentView.set('code');
       }
 
@@ -592,8 +604,16 @@ export class WorkbenchStore {
       }
 
       if (!isStreaming) {
-        await artifact.runner.runAction(data);
+        if (!skipDockerReplay) {
+          await artifact.runner.runAction(data);
+        }
+
         this.resetAllFileModifications();
+
+        // Docker has no Vite HMR — keep the live preview visible after iterative edits
+        if (getEffectiveExecutionTarget() === 'docker' && !isReloaded) {
+          this.currentView.set('preview');
+        }
       }
     } else {
       await artifact.runner.runAction(data);

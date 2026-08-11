@@ -1,7 +1,7 @@
 import { toast } from 'react-toastify';
 import { useStore } from '@nanostores/react';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { webcontainer } from '~/lib/webcontainer';
+import { getWebContainerPromise } from '~/lib/runtime';
 import { path } from '~/utils/path';
 import { useState } from 'react';
 import type { ActionCallbackData } from '~/lib/runtime/message-parser';
@@ -83,7 +83,7 @@ export function useGitHubDeploy() {
       });
 
       // Get all project files instead of just the build directory since we're deploying to a repository
-      const container = await webcontainer;
+      const container = await getWebContainerPromise();
 
       // Get all files recursively - we'll deploy the entire project, not just the build directory
       async function getAllFiles(dirPath: string, basePath: string = ''): Promise<Record<string, string>> {

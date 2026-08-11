@@ -49,3 +49,7 @@ docs/instructions/Roadmap.md
 .env.example
 .env.local
 .env
+
+# Docker runtime daemon sessions (M3)
+runtime-daemon/.sessions/
+.runtime-sessions/

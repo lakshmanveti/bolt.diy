@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { IconButton } from '~/components/ui/IconButton';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { dockerPreviewReloadToken } from '~/lib/runtime';
 import { PortDropdown } from './PortDropdown';
 import { ScreenshotSelector } from './ScreenshotSelector';
 import { expoUrlAtom } from '~/lib/stores/qrCodeStore';
@@ -60,7 +61,9 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   const [isPortDropdownOpen, setIsPortDropdownOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const hasSelectedPreview = useRef(false);
+  const previewBustRef = useRef(Date.now());
   const previews = useStore(workbenchStore.previews);
+  const reloadToken = useStore(dockerPreviewReloadToken);
   const activePreview = previews[activePreviewIndex];
   const [displayPath, setDisplayPath] = useState('/');
   const [iframeUrl, setIframeUrl] = useState<string | undefined>();
@@ -99,23 +102,28 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
     }
 
     const { baseUrl } = activePreview;
-    setIframeUrl(baseUrl);
-    setDisplayPath('/');
-  }, [activePreview]);
 
-  const findMinPortIndex = useCallback(
-    (minIndex: number, preview: { port: number }, index: number, array: { port: number }[]) => {
-      return preview.port < array[minIndex].port ? index : minIndex;
-    },
-    [],
-  );
+    try {
+      const next = new URL(baseUrl);
+      next.searchParams.set('_bl', String(reloadToken > 0 ? reloadToken : previewBustRef.current));
+      setIframeUrl(next.toString());
+    } catch {
+      setIframeUrl(baseUrl);
+    }
+
+    setDisplayPath('/');
+  }, [activePreview?.baseUrl, reloadToken]);
 
   useEffect(() => {
     if (previews.length > 1 && !hasSelectedPreview.current) {
-      const minPortIndex = previews.reduce(findMinPortIndex, 0);
-      setActivePreviewIndex(minPortIndex);
+      // Prefer newest ready preview — Docker host ports are ephemeral; min port is often stale
+      const readyIndexes = previews
+        .map((preview, index) => (preview.ready ? index : -1))
+        .filter((index) => index >= 0);
+      const nextIndex = readyIndexes.length > 0 ? readyIndexes[readyIndexes.length - 1]! : previews.length - 1;
+      setActivePreviewIndex(nextIndex);
     }
-  }, [previews, findMinPortIndex]);
+  }, [previews]);
 
   const reloadPreview = () => {
     if (iframeRef.current) {
@@ -980,6 +988,7 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
 
                     <iframe
                       ref={iframeRef}
+                      key={iframeUrl}
                       title="preview"
                       style={{
                         border: 'none',
@@ -997,6 +1006,7 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
               ) : (
                 <iframe
                   ref={iframeRef}
+                  key={iframeUrl}
                   title="preview"
                   className="border-none w-full h-full bg-bolt-elements-background-depth-1"
                   src={iframeUrl}

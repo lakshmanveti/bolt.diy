@@ -19,7 +19,7 @@ import {
 } from './db';
 import type { FileMap } from '~/lib/stores/files';
 import type { Snapshot } from './types';
-import { webcontainer } from '~/lib/webcontainer';
+import { getWebContainerPromise, getEffectiveExecutionTarget, getDockerRuntime, isDockerRuntimeAvailable } from '~/lib/runtime';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
 import { APP_NAME } from '~/utils/brand';
@@ -116,8 +116,42 @@ export function useChatHistory() {
                 .filter((x): x is { content: string; path: string } => !!x); // Type assertion
               const projectCommands = await detectProjectCommands(files);
 
-              // Call the modified function to get only the command actions string
-              const commandActionsString = createCommandActionsString(projectCommands);
+              /*
+               * Docker resume: reuse workdir / warm preview for this chatId.
+               * Skip npm install when node_modules exists; skip start when preview is already up.
+               */
+              let includeSetup = true;
+              let includeStart = true;
+              let includeFiles = true;
+
+              if (getEffectiveExecutionTarget() === 'docker' && isDockerRuntimeAvailable()) {
+                try {
+                  chatId.set(storedMessages.id);
+                  const resume = await getDockerRuntime().resume(storedMessages.id);
+
+                  if (resume.hasFiles) {
+                    getDockerRuntime().setHydrateSkipWrites(true);
+                    includeFiles = false;
+                  }
+
+                  if (resume.preview?.ready) {
+                    includeSetup = false;
+                    includeStart = false;
+                    console.log('[ChatHistory] Docker session resumed with live preview');
+                  } else if (resume.hasNodeModules || resume.softStarted) {
+                    includeSetup = false;
+                    includeStart = !resume.softStarted;
+                    console.log('[ChatHistory] Docker session soft-started / deps present');
+                  }
+                } catch (error) {
+                  console.warn('[ChatHistory] Docker resume failed, falling back to cold restore', error);
+                }
+              }
+
+              const commandActionsString = createCommandActionsString(projectCommands, {
+                includeSetup,
+                includeStart,
+              });
 
               filteredMessages = [
                 {
@@ -133,19 +167,23 @@ export function useChatHistory() {
                   // Combine followup message and the artifact with files and command actions
                   content: `${APP_NAME} restored your chat from a snapshot. You can revert this message to load the full chat history.
                   <boltArtifact id="restored-project-setup" title="Restored Project & Setup" type="bundled">
-                  ${Object.entries(snapshot?.files || {})
-                    .map(([key, value]) => {
-                      if (value?.type === 'file') {
-                        return `
+                  ${
+                    includeFiles
+                      ? Object.entries(snapshot?.files || {})
+                          .map(([key, value]) => {
+                            if (value?.type === 'file') {
+                              return `
                       <boltAction type="file" filePath="${key}">
 ${value.content}
                       </boltAction>
                       `;
-                      } else {
-                        return ``;
-                      }
-                    })
-                    .join('\n')}
+                            } else {
+                              return ``;
+                            }
+                          })
+                          .join('\n')
+                      : ''
+                  }
                   ${commandActionsString} 
                   </boltArtifact>
                   `, // Added commandActionsString, followupMessage, updated id and title
@@ -171,7 +209,23 @@ ${value.content}
                  */
                 ...filteredMessages,
               ];
-              restoreSnapshot(mixedId);
+              restoreSnapshot(mixedId, validSnapshot);
+            } else if (getEffectiveExecutionTarget() === 'docker' && isDockerRuntimeAvailable()) {
+              // No snapshot cold-restore path — still attach a warm Docker session if one exists
+              try {
+                chatId.set(storedMessages.id);
+                const resume = await getDockerRuntime().resume(storedMessages.id);
+
+                if (resume.hasFiles) {
+                  getDockerRuntime().setHydrateSkipWrites(true);
+                }
+
+                if (resume.preview?.ready) {
+                  console.log('[ChatHistory] Docker session attached (no snapshot restore)');
+                }
+              } catch (error) {
+                console.warn('[ChatHistory] Docker resume skipped', error);
+              }
             }
 
             setInitialMessages(filteredMessages);
@@ -225,7 +279,7 @@ ${value.content}
 
   const restoreSnapshot = useCallback(async (id: string, snapshot?: Snapshot) => {
     // const snapshotStr = localStorage.getItem(`snapshot:${id}`); // Remove localStorage usage
-    const container = await webcontainer;
+    const container = await getWebContainerPromise();
 
     const validSnapshot = snapshot || { chatIndex: '', files: {} };
 
