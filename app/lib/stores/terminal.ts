@@ -1,19 +1,20 @@
-import type { WebContainer, WebContainerProcess } from '@webcontainer/api';
+import type { WebContainer } from '@webcontainer/api';
 import { atom, type WritableAtom } from 'nanostores';
 import type { ITerminal } from '~/types/terminal';
-import { newBoltShellProcess, newShellProcess } from '~/utils/shell';
+import { newBoltShellProcess } from '~/utils/shell';
 import { coloredText } from '~/utils/terminal';
 
+/**
+ * Terminal store — WebContainer jsh is disabled.
+ * Docker shell/start go through DockerRuntime.exec / start (ActionRunner).
+ */
 export class TerminalStore {
-  #webcontainer: Promise<WebContainer>;
-  #terminals: Array<{ terminal: ITerminal; process: WebContainerProcess }> = [];
+  #terminals: Array<{ terminal: ITerminal }> = [];
   #boltTerminal = newBoltShellProcess();
 
-  showTerminal: WritableAtom<boolean> = import.meta.hot?.data.showTerminal ?? atom(true);
+  showTerminal: WritableAtom<boolean> = import.meta.hot?.data.showTerminal ?? atom(false);
 
-  constructor(webcontainerPromise: Promise<WebContainer>) {
-    this.#webcontainer = webcontainerPromise;
-
+  constructor(_webcontainerPromise: Promise<WebContainer>) {
     if (import.meta.hot) {
       import.meta.hot.data.showTerminal = this.showTerminal;
     }
@@ -26,43 +27,18 @@ export class TerminalStore {
     this.showTerminal.set(value !== undefined ? value : !this.showTerminal.get());
   }
   async attachBoltTerminal(terminal: ITerminal) {
-    try {
-      const wc = await this.#webcontainer;
-      await this.#boltTerminal.init(wc, terminal);
-    } catch (error: any) {
-      terminal.write(coloredText.red('Failed to spawn bolt shell\n\n') + error.message);
-      return;
-    }
+    terminal.write(coloredText.dim('Docker runtime — shell actions use the container via ActionRunner.\n'));
   }
 
   async attachTerminal(terminal: ITerminal) {
-    try {
-      const shellProcess = await newShellProcess(await this.#webcontainer, terminal);
-      this.#terminals.push({ terminal, process: shellProcess });
-    } catch (error: any) {
-      terminal.write(coloredText.red('Failed to spawn shell\n\n') + error.message);
-      return;
-    }
+    terminal.write(coloredText.dim('WebContainer shell disabled. Use Docker runtime.\n'));
   }
 
-  onTerminalResize(cols: number, rows: number) {
-    for (const { process } of this.#terminals) {
-      process.resize({ cols, rows });
-    }
+  onTerminalResize(_cols: number, _rows: number) {
+    // no-op without WC processes
   }
 
-  async detachTerminal(terminal: ITerminal) {
-    const terminalIndex = this.#terminals.findIndex((t) => t.terminal === terminal);
-
-    if (terminalIndex !== -1) {
-      const { process } = this.#terminals[terminalIndex];
-
-      try {
-        process.kill();
-      } catch (error) {
-        console.warn('Failed to kill terminal process:', error);
-      }
-      this.#terminals.splice(terminalIndex, 1);
-    }
+  detachTerminal(terminal: ITerminal) {
+    this.#terminals = this.#terminals.filter((t) => t.terminal !== terminal);
   }
 }

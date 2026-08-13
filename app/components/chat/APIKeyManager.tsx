@@ -9,6 +9,8 @@ interface APIKeyManagerProps {
   setApiKey: (key: string) => void;
   getApiKeyLink?: string;
   labelForGetApiKey?: string;
+  /** Setup flow: always show an input so users can save a key to their account. */
+  variant?: 'default' | 'setup';
 }
 
 // cache which stores whether the provider's API key is set via environment variable
@@ -32,21 +34,27 @@ export function getApiKeysFromCookies() {
 }
 
 // eslint-disable-next-line @typescript-eslint/naming-convention
-export const APIKeyManager: React.FC<APIKeyManagerProps> = ({ provider, apiKey, setApiKey }) => {
-  const [isEditing, setIsEditing] = useState(false);
+export const APIKeyManager: React.FC<APIKeyManagerProps> = ({ provider, apiKey, setApiKey, variant = 'default' }) => {
+  const isSetup = variant === 'setup';
+  const [isEditing, setIsEditing] = useState(isSetup);
   const [tempKey, setTempKey] = useState(apiKey);
   const [isEnvKeySet, setIsEnvKeySet] = useState(false);
 
   // Reset states and load saved key when provider changes
   useEffect(() => {
-    // Load saved API key from cookies for this provider
+    if (isSetup) {
+      setTempKey(apiKey);
+      setIsEditing(true);
+      return;
+    }
+
     const savedKeys = getApiKeysFromCookies();
     const savedKey = savedKeys[provider.name] || '';
 
     setTempKey(savedKey);
     setApiKey(savedKey);
     setIsEditing(false);
-  }, [provider.name]);
+  }, [provider.name, isSetup]);
 
   const checkEnvApiKey = useCallback(async () => {
     // Check cache first
@@ -74,16 +82,54 @@ export const APIKeyManager: React.FC<APIKeyManagerProps> = ({ provider, apiKey, 
   }, [checkEnvApiKey]);
 
   const handleSave = () => {
-    // Save to parent state
     setApiKey(tempKey);
 
-    // Save to cookies
     const currentKeys = getApiKeysFromCookies();
     const newKeys = { ...currentKeys, [provider.name]: tempKey };
     Cookies.set('apiKeys', JSON.stringify(newKeys));
 
-    setIsEditing(false);
+    if (!isSetup) {
+      setIsEditing(false);
+    }
   };
+
+  const handleSetupInputChange = (value: string) => {
+    setTempKey(value);
+    setApiKey(value);
+  };
+
+  if (isSetup) {
+    return (
+      <div className="flex flex-col gap-2 py-1">
+        <label className="text-sm font-medium text-bolt-elements-textSecondary">
+          {provider.name} API key
+        </label>
+        {isEnvKeySet && (
+          <p className="text-xs text-bolt-elements-textTertiary">
+            A server environment key is configured. Enter your own key below to store it on your account, or leave
+            blank and use &quot;Save and continue&quot; to rely on the server key.
+          </p>
+        )}
+        <input
+          type="password"
+          value={tempKey}
+          placeholder="Paste your API key"
+          autoComplete="off"
+          onChange={(e) => handleSetupInputChange(e.target.value)}
+          className="w-full px-3 py-2 text-sm rounded-md border border-bolt-elements-borderColor bg-bolt-elements-background-depth-1 text-bolt-elements-textPrimary focus:outline-none focus:ring-2 focus:ring-bolt-elements-focus"
+        />
+        {provider?.getApiKeyLink && (
+          <button
+            type="button"
+            className="text-xs text-accent-500 hover:underline self-start"
+            onClick={() => window.open(provider.getApiKeyLink!, '_blank', 'noopener,noreferrer')}
+          >
+            {provider.labelForGetApiKey || 'Get an API key'}
+          </button>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="flex items-center justify-between py-3 px-1">
@@ -142,16 +188,20 @@ export const APIKeyManager: React.FC<APIKeyManagerProps> = ({ provider, apiKey, 
           </div>
         ) : (
           <>
-            {
-              <IconButton
-                onClick={() => setIsEditing(true)}
-                title="Edit API Key"
-                className="bg-blue-500/10 hover:bg-blue-500/20 text-blue-500"
-              >
-                <div className="i-ph:pencil-simple w-4 h-4" />
-              </IconButton>
-            }
-            {provider?.getApiKeyLink && !apiKey && (
+            <IconButton
+              onClick={() => {
+                setTempKey(apiKey);
+                setIsEditing(true);
+              }}
+              title={isEnvKeySet ? 'Enter your own API key' : 'Edit API Key'}
+              className="bg-blue-500/10 hover:bg-blue-500/20 text-blue-500"
+            >
+              <div className="i-ph:pencil-simple w-4 h-4" />
+            </IconButton>
+            {isEnvKeySet && !apiKey && (
+              <span className="text-xs text-bolt-elements-textTertiary">or edit to use your own key</span>
+            )}
+            {provider?.getApiKeyLink && !apiKey && !isEnvKeySet && (
               <IconButton
                 onClick={() => window.open(provider?.getApiKeyLink)}
                 title="Get API Key"

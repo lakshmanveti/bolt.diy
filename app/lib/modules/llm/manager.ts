@@ -1,5 +1,6 @@
 import type { IProviderSetting } from '~/types/model';
 import { BaseProvider } from './base-provider';
+import { getEnvDefaultLlmProvider } from './defaults';
 import type { ModelInfo, ProviderInfo } from './types';
 import * as providers from './registry';
 import { createScopedLogger } from '~/utils/logger';
@@ -201,6 +202,16 @@ export class LLMManager {
   }
 
   getDefaultProvider(): BaseProvider {
+    const envDefault = getEnvDefaultLlmProvider();
+
+    if (envDefault) {
+      const fromEnv = this._providers.get(envDefault);
+
+      if (fromEnv) {
+        return fromEnv;
+      }
+    }
+
     const firstProvider = this._providers.values().next().value;
 
     if (!firstProvider) {

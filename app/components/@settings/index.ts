@@ -1,5 +1,7 @@
 // Core exports
-export { ControlPanel } from './core/ControlPanel';
+export { SettingsTabModal } from './core/SettingsTabModal';
+export { getSettingsTabComponent } from './core/getSettingsTabComponent';
+export { useVisibleUserTabs } from './core/useVisibleUserTabs';
 export type { TabType, TabVisibilityConfig } from './core/types';
 
 // Constants

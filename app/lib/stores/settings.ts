@@ -1,4 +1,8 @@
 import { atom, map } from 'nanostores';
+import {
+  getEnvBlockedLlmProviders,
+  getEnvEnabledLlmProviders,
+} from '~/lib/modules/llm/defaults';
 import { PROVIDER_LIST } from '~/utils/constants';
 import type { IProviderConfig } from '~/types/model';
 import type { TabVisibilityConfig, TabWindowConfig, UserTabConfig } from '~/components/@settings/core/types';
@@ -86,13 +90,13 @@ const fetchConfiguredProviders = async (): Promise<ConfiguredProvider[]> => {
 const getInitialProviderSettings = (): ProviderSetting => {
   const initialSettings: ProviderSetting = {};
 
-  // Start with default settings
+  const enabledFromEnv = getEnvEnabledLlmProviders();
+
   PROVIDER_LIST.forEach((provider) => {
     initialSettings[provider.name] = {
       ...provider,
       settings: {
-        // Local providers should be disabled by default
-        enabled: !LOCAL_PROVIDERS.includes(provider.name),
+        enabled: enabledFromEnv.length > 0 ? enabledFromEnv.includes(provider.name) : false,
       },
     };
   });
@@ -113,6 +117,15 @@ const getInitialProviderSettings = (): ProviderSetting => {
         console.error('Error parsing saved provider settings:', error);
       }
     }
+
+    // Ensure env-blocked providers stay disabled (e.g. Amazon Bedrock, LMStudio)
+    const blocked = getEnvBlockedLlmProviders();
+
+    for (const name of blocked) {
+      if (initialSettings[name]) {
+        initialSettings[name].settings.enabled = false;
+      }
+    }
   }
 
   return initialSettings;
@@ -120,67 +133,8 @@ const getInitialProviderSettings = (): ProviderSetting => {
 
 // Auto-enable providers that are configured on the server
 const autoEnableConfiguredProviders = async () => {
-  if (!isBrowser) {
-    return;
-  }
-
-  try {
-    const configuredProviders = await fetchConfiguredProviders();
-    const currentSettings = providersStore.get();
-    const savedSettings = localStorage.getItem(PROVIDER_SETTINGS_KEY);
-    const autoEnabledProviders = localStorage.getItem(AUTO_ENABLED_KEY);
-
-    // Track which providers were auto-enabled to avoid overriding user preferences
-    const previouslyAutoEnabled = autoEnabledProviders ? JSON.parse(autoEnabledProviders) : [];
-    const newlyAutoEnabled: string[] = [];
-
-    let hasChanges = false;
-
-    configuredProviders.forEach(({ name, isConfigured, configMethod }) => {
-      if (isConfigured && configMethod === 'environment' && LOCAL_PROVIDERS.includes(name)) {
-        const currentProvider = currentSettings[name];
-
-        if (currentProvider) {
-          /*
-           * Only auto-enable if:
-           * 1. Provider is not already enabled, AND
-           * 2. Either we haven't saved settings yet (first time) OR provider was previously auto-enabled
-           */
-          const hasUserSettings = savedSettings !== null;
-          const wasAutoEnabled = previouslyAutoEnabled.includes(name);
-          const shouldAutoEnable = !currentProvider.settings.enabled && (!hasUserSettings || wasAutoEnabled);
-
-          if (shouldAutoEnable) {
-            currentSettings[name] = {
-              ...currentProvider,
-              settings: {
-                ...currentProvider.settings,
-                enabled: true,
-              },
-            };
-            newlyAutoEnabled.push(name);
-            hasChanges = true;
-          }
-        }
-      }
-    });
-
-    if (hasChanges) {
-      // Update the store
-      providersStore.set(currentSettings);
-
-      // Save to localStorage
-      localStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(currentSettings));
-
-      // Update the auto-enabled providers list
-      const allAutoEnabled = [...new Set([...previouslyAutoEnabled, ...newlyAutoEnabled])];
-      localStorage.setItem(AUTO_ENABLED_KEY, JSON.stringify(allAutoEnabled));
-
-      console.log(`Auto-enabled providers: ${newlyAutoEnabled.join(', ')}`);
-    }
-  } catch (error) {
-    console.error('Error auto-enabling configured providers:', error);
-  }
+  // BuildLive uses Anthropic from .env by default — skip auto-enabling Ollama/LMStudio from env URLs.
+  return;
 };
 
 export const providersStore = map<ProviderSetting>(getInitialProviderSettings());

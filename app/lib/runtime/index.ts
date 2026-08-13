@@ -1,5 +1,5 @@
 import type { WebContainer } from '@webcontainer/api';
-import { getDeploymentTarget, isDockerRuntimeAvailable } from './deployment-target';
+import { getDeploymentTarget } from './deployment-target';
 import { DockerRuntime } from './docker-runtime';
 import type { AppRuntime, DeploymentTarget } from './types';
 import { WebContainerRuntime } from './webcontainer-runtime';
@@ -13,8 +13,14 @@ export {
   setDeploymentTarget,
   isDockerRuntimeAvailable,
   setDockerRuntimeAvailable,
+  migrateDeploymentTargetToDocker,
 } from './deployment-target';
-export { DOCKER_RUNTIME_NOT_CONFIGURED, DockerRuntime, dockerPreviewReloadToken } from './docker-runtime';
+export {
+  DOCKER_RUNTIME_NOT_CONFIGURED,
+  DockerRuntime,
+  dockerPreviewReloadToken,
+  verifyPreviewReachable,
+} from './docker-runtime';
 export type { ResumeResult } from './docker-runtime';
 export { WebContainerRuntime } from './webcontainer-runtime';
 
@@ -52,44 +58,33 @@ export function getSelectedDeploymentTarget(): DeploymentTarget {
 }
 
 /**
- * Backend that should actually run builds right now.
- * Falls back to WebContainer when Docker is selected but the daemon is down.
+ * Execution backend. BuildLive is Docker-only; WebContainer is no longer a fallback.
  */
 export function getEffectiveExecutionTarget(): DeploymentTarget {
-  const selected = getDeploymentTarget();
-
-  if (selected === 'docker' && !isDockerRuntimeAvailable()) {
-    return 'webcontainer';
-  }
-
-  return selected;
+  return 'docker';
 }
 
-/** AppRuntime for the *selected* setting (Docker stub/client even if daemon down). */
+/** AppRuntime — always Docker. */
 export function getRuntime(): AppRuntime {
-  if (getDeploymentTarget() === 'docker') {
-    return getDockerRuntimeInstance();
-  }
-
-  return getWebContainerRuntime();
+  return getDockerRuntimeInstance();
 }
 
-/** AppRuntime used for live execution (honors daemon availability). */
+/** AppRuntime used for live execution — always Docker. */
 export function getExecutionRuntime(): AppRuntime {
-  if (getEffectiveExecutionTarget() === 'docker') {
-    return getDockerRuntimeInstance();
-  }
-
-  return getWebContainerRuntime();
+  return getDockerRuntimeInstance();
 }
 
 export function getDockerRuntime(): DockerRuntime {
   return getDockerRuntimeInstance();
 }
 
-/** WebContainer promise for legacy stores (M1 bridge). */
+/** WebContainer disabled — callers should use DockerRuntime / workbench FilesStore. */
 export function getWebContainerPromise(): Promise<WebContainer> {
-  return getWebContainerRuntime().getWebContainer();
+  const err = new Error('WebContainer is disabled in BuildLive. Use the Docker runtime.');
+  const rejected = Promise.reject(err) as Promise<WebContainer>;
+  rejected.catch(() => undefined);
+
+  return rejected;
 }
 
 /**

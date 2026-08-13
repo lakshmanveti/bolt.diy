@@ -3,6 +3,7 @@ import { memo, useEffect, useState } from 'react';
 import type { ActionState } from '~/lib/runtime/action-runner';
 import type { ProgressAnnotation } from '~/types/context';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { previewHealthStore } from '~/lib/stores/preview-health';
 import { classNames } from '~/utils/classNames';
 import { dedupeProgressItems, labelForAction, type ProgressItem } from '~/lib/consumer/progressLabels';
 import {
@@ -130,7 +131,8 @@ export const BuildProgress = memo(
   ({ className, annotations = [], isStreaming = false, promptSummary }: BuildProgressProps) => {
     const items = useBuildProgressItems();
     const previews = useStore(workbenchStore.previews);
-    const hasPreview = previews.some((p) => p.ready && p.baseUrl);
+    const previewHealth = useStore(previewHealthStore);
+    const hasPreview = previews.some((p) => p.ready && p.baseUrl) && previewHealth.status !== 'unreachable';
     const [expanded, setExpanded] = useState(false);
 
     const latestAnnotation = [...annotations].sort((a, b) => b.order - a.order)[0];

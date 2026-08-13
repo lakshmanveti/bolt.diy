@@ -29,6 +29,22 @@ type PreviewListener = (preview: PreviewInfoEvent) => void;
 /** Require a few failures before flipping Ready → Offline (avoids Windows Docker flicker). */
 const FAILURES_BEFORE_OFFLINE = 3;
 const HEALTH_TIMEOUT_MS = 5000;
+const PREVIEW_VERIFY_TIMEOUT_MS = 5000;
+
+/** Probe a mapped preview URL — 2xx/3xx counts as reachable (404 = broken preview). */
+export async function verifyPreviewReachable(baseUrl: string, timeoutMs = PREVIEW_VERIFY_TIMEOUT_MS): Promise<boolean> {
+  try {
+    const res = await fetch(baseUrl, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    return res.ok || (res.status >= 300 && res.status < 400);
+  } catch {
+    return false;
+  }
+}
 
 export interface ResumeResult {
   resumed: boolean;
@@ -278,6 +294,44 @@ export class DockerRuntime implements AppRuntime {
    */
   reloadPreview(): void {
     this.#schedulePreviewRedeploy(0);
+  }
+
+  /**
+   * Restart the preview process in Docker (user retry or auto-recovery).
+   * Emits a new preview event when the daemon reports ready.
+   */
+  async recoverPreview(): Promise<PreviewInfoEvent | null> {
+    await this.ensureSession();
+
+    if (!this.#sessionId) {
+      return null;
+    }
+
+    try {
+      const res = await fetch(`${this.#daemonUrl}/sessions/${this.#sessionId}/restart`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        preview?: { port: number; hostPort: number; url: string; ready: boolean } | null;
+      };
+
+      if (!res.ok || !data.preview?.ready || !data.preview.url) {
+        console.warn('[DockerRuntime] recoverPreview failed:', data.error);
+        return null;
+      }
+
+      this.#lastPreviewUrl = undefined;
+      const event = toPreviewEvent(data.preview);
+      this.#emitPreview(event);
+      return event;
+    } catch (error) {
+      console.warn('[DockerRuntime] recoverPreview failed:', error);
+      return null;
+    }
   }
 
   #schedulePreviewRedeploy(delayMs = 1500) {

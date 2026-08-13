@@ -1,12 +1,8 @@
 /**
- * Low-level WebContainer boot singleton.
- *
- * Prefer `getWebContainerPromise()` / `getRuntime()` from `~/lib/runtime` for new code.
- * This module remains the WC boot implementation used by WebContainerRuntime (M1).
+ * WebContainer boot is disabled — BuildLive uses Docker runtime only.
+ * Legacy imports still resolve; awaiting this promise rejects.
  */
-import { WebContainer } from '@webcontainer/api';
-import { WORK_DIR_NAME } from '~/utils/constants';
-import { cleanStackTrace } from '~/utils/stacktrace';
+import type { WebContainer } from '@webcontainer/api';
 
 interface WebContainerContext {
   loaded: boolean;
@@ -20,52 +16,15 @@ if (import.meta.hot) {
   import.meta.hot.data.webcontainerContext = webcontainerContext;
 }
 
-export let webcontainer: Promise<WebContainer> = new Promise(() => {
-  // noop for ssr
-});
+const DISABLED = new Error(
+  'WebContainer is disabled in BuildLive. Use the Docker runtime daemon (`pnpm runtime:daemon`).',
+);
 
-if (!import.meta.env.SSR) {
-  webcontainer =
-    import.meta.hot?.data.webcontainer ??
-    Promise.resolve()
-      .then(() => {
-        return WebContainer.boot({
-          coep: 'credentialless',
-          workdirName: WORK_DIR_NAME,
-          forwardPreviewErrors: true, // Enable error forwarding from iframes
-        });
-      })
-      .then(async (webcontainer) => {
-        webcontainerContext.loaded = true;
+export let webcontainer: Promise<WebContainer> = Promise.reject(DISABLED);
 
-        const { workbenchStore } = await import('~/lib/stores/workbench');
+// Avoid unhandled rejection noise from the module-level promise
+webcontainer.catch(() => undefined);
 
-        const response = await fetch('/inspector-script.js');
-        const inspectorScript = await response.text();
-        await webcontainer.setPreviewScript(inspectorScript);
-
-        // Listen for preview errors
-        webcontainer.on('preview-message', (message) => {
-          console.log('WebContainer preview message:', message);
-
-          // Handle both uncaught exceptions and unhandled promise rejections
-          if (message.type === 'PREVIEW_UNCAUGHT_EXCEPTION' || message.type === 'PREVIEW_UNHANDLED_REJECTION') {
-            const isPromise = message.type === 'PREVIEW_UNHANDLED_REJECTION';
-            const title = isPromise ? 'Unhandled Promise Rejection' : 'Uncaught Exception';
-            workbenchStore.actionAlert.set({
-              type: 'preview',
-              title,
-              description: 'message' in message ? message.message : 'Unknown error',
-              content: `Error occurred at ${message.pathname}${message.search}${message.hash}\nPort: ${message.port}\n\nStack trace:\n${cleanStackTrace(message.stack || '')}`,
-              source: 'preview',
-            });
-          }
-        });
-
-        return webcontainer;
-      });
-
-  if (import.meta.hot) {
-    import.meta.hot.data.webcontainer = webcontainer;
-  }
+if (import.meta.hot) {
+  import.meta.hot.data.webcontainer = webcontainer;
 }

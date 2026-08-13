@@ -5,9 +5,14 @@ import { Menu } from '~/components/sidebar/Menu.client';
 import { classNames } from '~/utils/classNames';
 import { PROVIDER_LIST } from '~/utils/constants';
 import { APP_HERO_SUBTITLE, APP_HERO_TITLE } from '~/utils/brand';
+import { BuildLiveLogo } from '~/components/ui/BuildLiveLogo';
+import { openSidebar } from '~/lib/stores/sidebar';
+import { AuthButton } from '~/components/auth/AuthButton';
+import { ChatDescription } from '~/lib/persistence/ChatDescription.client';
 import { getApiKeysFromCookies } from '~/components/chat/APIKeyManager';
 import Cookies from 'js-cookie';
 import { ChatBox } from '~/components/chat/ChatBox';
+import { UserLlmPreferencesSetup } from '~/components/auth/UserLlmPreferencesSetup';
 import ChatAlert from '~/components/chat/ChatAlert';
 import { SupabaseChatAlert } from '~/components/chat/SupabaseAlert';
 import DeployChatAlert from '~/components/deploy/DeployAlert';
@@ -72,6 +77,10 @@ export interface ConsumerShellProps {
   setSelectedElement?: (element: ElementInfo | null) => void;
   addToolResult?: ({ toolCallId, result }: { toolCallId: string; result: any }) => void;
   onWebSearchResult?: (result: string) => void;
+  llmConfigReady?: boolean;
+  userPreferencesReady?: boolean;
+  onPreferencesSaved?: (prefs: import('~/lib/supabase/user-preferences').UserPreferences) => void;
+  onApiKeysChange?: (providerName: string, apiKey: string) => void;
 }
 
 export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps>(
@@ -116,6 +125,10 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
       selectedElement,
       setSelectedElement,
       onWebSearchResult,
+      llmConfigReady = true,
+      userPreferencesReady = true,
+      onPreferencesSaved,
+      onApiKeysChange,
     },
     ref,
   ) => {
@@ -218,10 +231,11 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
         .finally(() => setIsModelLoading(undefined));
     }, [providerList, provider]);
 
-    const onApiKeysChange = async (providerName: string, apiKey: string) => {
+    const handleApiKeysChangeLocal = async (providerName: string, apiKey: string) => {
       const newApiKeys = { ...apiKeys, [providerName]: apiKey };
       setApiKeys(newApiKeys);
       Cookies.set('apiKeys', JSON.stringify(newApiKeys));
+      onApiKeysChange?.(providerName, apiKey);
       setIsModelLoading(providerName);
 
       try {
@@ -386,56 +400,70 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
           </div>
         )}
 
-        <ChatBox
-          isModelSettingsCollapsed={isModelSettingsCollapsed}
-          setIsModelSettingsCollapsed={setIsModelSettingsCollapsed}
-          provider={provider}
-          providerList={providerList || (PROVIDER_LIST as ProviderInfo[])}
-          modelList={modelList}
-          apiKeys={apiKeys}
-          isModelLoading={isModelLoading}
-          onApiKeysChange={onApiKeysChange}
-          uploadedFiles={uploadedFiles}
-          imageDataList={imageDataList}
-          textareaRef={textareaRef}
-          input={input}
-          handlePaste={handlePaste}
-          TEXTAREA_MIN_HEIGHT={TEXTAREA_MIN_HEIGHT}
-          TEXTAREA_MAX_HEIGHT={TEXTAREA_MAX_HEIGHT}
-          isStreaming={isStreaming}
-          handleSendMessage={handleSendMessage}
-          isListening={isListening}
-          startListening={() => {
-            recognition?.start();
-            setIsListening(true);
-          }}
-          stopListening={() => {
-            recognition?.stop();
-            setIsListening(false);
-          }}
-          chatStarted={activeSession}
-          exportChat={exportChat}
-          qrModalOpen={qrModalOpen}
-          setQrModalOpen={setQrModalOpen}
-          handleFileUpload={handleFileUpload}
-          setProvider={setProvider}
-          model={model}
-          setModel={setModel}
-          setUploadedFiles={setUploadedFiles}
-          setImageDataList={setImageDataList}
-          handleInputChange={handleInputChange}
-          handleStop={handleStop}
-          enhancingPrompt={enhancingPrompt}
-          enhancePrompt={enhancePrompt}
-          onWebSearchResult={onWebSearchResult}
-          chatMode={chatMode}
-          setChatMode={setChatMode}
-          designScheme={designScheme}
-          setDesignScheme={setDesignScheme}
-          selectedElement={selectedElement}
-          setSelectedElement={setSelectedElement}
-          toolbarMode="minimal"
-        />
+        {!userPreferencesReady ? (
+          <div
+            className="mt-4 h-24 animate-pulse rounded-md bg-bolt-elements-background-depth-3"
+            aria-busy="true"
+            aria-label="Loading model preferences"
+          />
+        ) : !llmConfigReady ? (
+          <UserLlmPreferencesSetup
+            providerList={providerList || (PROVIDER_LIST as ProviderInfo[])}
+            onSaved={(prefs) => onPreferencesSaved?.(prefs)}
+          />
+        ) : (
+          <ChatBox
+            isModelSettingsCollapsed={isModelSettingsCollapsed}
+            setIsModelSettingsCollapsed={setIsModelSettingsCollapsed}
+            provider={provider}
+            providerList={providerList || (PROVIDER_LIST as ProviderInfo[])}
+            modelList={modelList}
+            apiKeys={apiKeys}
+            isModelLoading={isModelLoading}
+            onApiKeysChange={handleApiKeysChangeLocal}
+            uploadedFiles={uploadedFiles}
+            imageDataList={imageDataList}
+            textareaRef={textareaRef}
+            input={input}
+            handlePaste={handlePaste}
+            TEXTAREA_MIN_HEIGHT={TEXTAREA_MIN_HEIGHT}
+            TEXTAREA_MAX_HEIGHT={TEXTAREA_MAX_HEIGHT}
+            isStreaming={isStreaming}
+            handleSendMessage={handleSendMessage}
+            isListening={isListening}
+            startListening={() => {
+              recognition?.start();
+              setIsListening(true);
+            }}
+            stopListening={() => {
+              recognition?.stop();
+              setIsListening(false);
+            }}
+            chatStarted={activeSession}
+            exportChat={exportChat}
+            qrModalOpen={qrModalOpen}
+            setQrModalOpen={setQrModalOpen}
+            handleFileUpload={handleFileUpload}
+            setProvider={setProvider}
+            model={model}
+            setModel={setModel}
+            setUploadedFiles={setUploadedFiles}
+            setImageDataList={setImageDataList}
+            handleInputChange={handleInputChange}
+            handleStop={handleStop}
+            enhancingPrompt={enhancingPrompt}
+            enhancePrompt={enhancePrompt}
+            onWebSearchResult={onWebSearchResult}
+            chatMode={chatMode}
+            setChatMode={setChatMode}
+            designScheme={designScheme}
+            setDesignScheme={setDesignScheme}
+            selectedElement={selectedElement}
+            setSelectedElement={setSelectedElement}
+            toolbarMode="minimal"
+            chatInputDisabled={!llmConfigReady}
+          />
+        )}
       </div>
     );
 
@@ -472,20 +500,55 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
           {/* Chat column — right on desktop; composer pinned to bottom */}
           <div
             className={classNames(
-              'flex flex-col h-full min-h-0',
+              'flex flex-col h-full min-h-0 bg-bolt-elements-background-depth-1',
               activeSession ? 'lg:w-[380px] xl:w-[420px] w-full shrink-0' : 'w-full',
             )}
           >
+            <div className="shrink-0 flex items-center gap-2 px-3 sm:px-4 h-12 border-b border-bolt-elements-borderColor">
+              <button
+                type="button"
+                onClick={openSidebar}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-accent-500/50 bg-bolt-elements-background-depth-2 text-accent-500 hover:bg-accent-500/10"
+                aria-label="Open history"
+                title="History"
+              >
+                <span className="i-ph:sidebar-simple h-4.5 w-4.5" />
+              </button>
+              <div className="min-w-0 flex-1">
+                {activeSession ? (
+                  <ClientOnly>
+                    {() => (
+                      <div className="truncate text-sm font-medium text-bolt-elements-textPrimary">
+                        <ChatDescription />
+                      </div>
+                    )}
+                  </ClientOnly>
+                ) : null}
+              </div>
+              <a
+                href="/"
+                className="inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-bolt-elements-textSecondary hover:bg-bolt-elements-background-depth-2"
+                title="New app"
+              >
+                <span className="i-ph:plus h-3.5 w-3.5" />
+                New
+              </a>
+              <ClientOnly>{() => <AuthButton layout="header" />}</ClientOnly>
+            </div>
+
             {!activeSession ? (
               <div className="flex flex-1 flex-col min-h-0 overflow-y-auto px-4 sm:px-6">
-                <div className="flex flex-col items-center text-center px-2 pt-[12vh] pb-8 w-full max-w-xl mx-auto">
-                  <h1 className="text-3xl lg:text-5xl font-bold text-bolt-elements-textPrimary mb-3">
+                <div className="flex flex-col items-center text-center px-2 pt-[10vh] pb-8 w-full max-w-xl mx-auto">
+                  <h1 className="text-3xl lg:text-5xl font-semibold tracking-tight text-bolt-elements-textPrimary mb-3">
                     {APP_HERO_TITLE}
                   </h1>
-                  <p className="text-base text-bolt-elements-textSecondary mb-8 max-w-md">
+                  <p className="text-base text-bolt-elements-textSecondary mb-8 max-w-md leading-relaxed">
                     {APP_HERO_SUBTITLE}
                   </p>
                   <div className="w-full text-left">{composer}</div>
+                  <div className="mt-8 flex justify-center">
+                    <BuildLiveLogo size="hero" />
+                  </div>
                 </div>
               </div>
             ) : (

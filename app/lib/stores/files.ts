@@ -548,10 +548,8 @@ export class FilesStore {
   }
 
   async saveFile(filePath: string, content: string) {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, filePath);
+      const relativePath = path.relative(WORK_DIR, filePath) || filePath.replace(/^\/home\/project\/?/, '');
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid file path, write '${relativePath}'`);
@@ -559,21 +557,14 @@ export class FilesStore {
 
       const oldContent = this.getFile(filePath)?.content;
 
-      if (!oldContent && oldContent !== '') {
-        unreachable('Expected content to be defined');
-      }
-
-      await webcontainer.fs.writeFile(relativePath, content);
-
-      if (!this.#modifiedFiles.has(filePath)) {
+      if (!this.#modifiedFiles.has(filePath) && (oldContent || oldContent === '')) {
         this.#modifiedFiles.set(filePath, oldContent);
       }
 
-      // Get the current lock state before updating
       const currentFile = this.files.get()[filePath];
       const isLocked = currentFile?.type === 'file' ? currentFile.isLocked : false;
 
-      // we immediately update the file and don't rely on the `change` event coming from the watcher
+      // In-memory only — Docker volume is written by ActionRunner / DockerRuntime
       this.files.setKey(filePath, {
         type: 'file',
         content,
@@ -581,7 +572,9 @@ export class FilesStore {
         isLocked,
       });
 
-      logger.info('File updated');
+      this.#size = Object.keys(this.files.get()).filter((k) => this.files.get()[k]?.type === 'file').length;
+
+      logger.info('File updated (memory)');
     } catch (error) {
       logger.error('Failed to update file content\n\n', error);
 
@@ -589,50 +582,43 @@ export class FilesStore {
     }
   }
 
-  async #init() {
-    const webcontainer = await this.#webcontainer;
+  /** Apply an AI/runtime write into the editor store without touching WebContainer. */
+  applyRemoteWrite(filePath: string, content: string) {
+    const fullPath = filePath.startsWith(WORK_DIR) ? filePath : path.join(WORK_DIR, filePath.replace(/^\//, ''));
+    const currentFile = this.files.get()[fullPath];
+    const isLocked = currentFile?.type === 'file' ? currentFile.isLocked : false;
 
-    // Clean up any files that were previously deleted
+    if (!this.files.get()[fullPath]) {
+      this.#size++;
+    }
+
+    this.files.setKey(fullPath, {
+      type: 'file',
+      content,
+      isBinary: false,
+      isLocked,
+    });
+  }
+
+  async #init() {
+    // Docker-only: FilesStore is an in-memory cache. DockerRuntime owns the volume.
     this.#cleanupDeletedFiles();
 
-    // Set up file watcher
-    webcontainer.internal.watchPaths(
-      {
-        include: [`${WORK_DIR}/**`],
-        exclude: ['**/node_modules', '.git', '**/package-lock.json'],
-        includeContent: true,
-      },
-      bufferWatchEvents(100, this.#processEventBuffer.bind(this)),
-    );
-
-    // Get the current chat ID
     const currentChatId = getCurrentChatId();
-
-    // Migrate any legacy locks to the current chat
     migrateLegacyLocks(currentChatId);
-
-    // Load locked files immediately for the current chat
     this.#loadLockedFiles(currentChatId);
 
-    /**
-     * Also set up a timer to load locked files again after a delay.
-     * This ensures that locks are applied even if files are loaded asynchronously.
-     */
     setTimeout(() => {
       this.#loadLockedFiles(currentChatId);
     }, 2000);
 
     /**
-     * Set up a less frequent periodic check to ensure locks remain applied.
-     * This is now less critical since we have the storage event listener.
+     * Periodic check so locks remain applied after SPA navigations.
      */
     setInterval(() => {
-      // Clear the cache to force a fresh read from localStorage
       clearCache();
-
-      const latestChatId = getCurrentChatId();
-      this.#loadLockedFiles(latestChatId);
-    }, 30000); // Reduced from 10s to 30s
+      this.#loadLockedFiles(getCurrentChatId());
+    }, 30000);
   }
 
   /**
@@ -768,26 +754,19 @@ export class FilesStore {
   }
 
   async createFile(filePath: string, content: string | Uint8Array = '') {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, filePath);
+      const relativePath = path.relative(WORK_DIR, filePath) || filePath.replace(/^\/home\/project\/?/, '');
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid file path, create '${relativePath}'`);
       }
 
-      const dirPath = path.dirname(relativePath);
-
-      if (dirPath !== '.') {
-        await webcontainer.fs.mkdir(dirPath, { recursive: true });
-      }
-
       const isBinary = content instanceof Uint8Array;
+      const { getDockerRuntime } = await import('~/lib/runtime');
+      const runtime = getDockerRuntime();
 
       if (isBinary) {
-        await webcontainer.fs.writeFile(relativePath, Buffer.from(content));
-
+        await runtime.writeFile(relativePath, content);
         const base64Content = Buffer.from(content).toString('base64');
         this.files.setKey(filePath, {
           type: 'file',
@@ -795,22 +774,20 @@ export class FilesStore {
           isBinary: true,
           isLocked: false,
         });
-
         this.#modifiedFiles.set(filePath, base64Content);
       } else {
-        const contentToWrite = (content as string).length === 0 ? ' ' : content;
-        await webcontainer.fs.writeFile(relativePath, contentToWrite);
-
+        const contentToWrite = (content as string).length === 0 ? ' ' : (content as string);
+        await runtime.writeFile(relativePath, contentToWrite);
         this.files.setKey(filePath, {
           type: 'file',
           content: content as string,
           isBinary: false,
           isLocked: false,
         });
-
         this.#modifiedFiles.set(filePath, content as string);
       }
 
+      this.#size++;
       logger.info(`File created: ${filePath}`);
 
       return true;
@@ -821,19 +798,17 @@ export class FilesStore {
   }
 
   async createFolder(folderPath: string) {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, folderPath);
+      const relativePath = path.relative(WORK_DIR, folderPath) || folderPath.replace(/^\/home\/project\/?/, '');
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid folder path, create '${relativePath}'`);
       }
 
-      await webcontainer.fs.mkdir(relativePath, { recursive: true });
+      const { getDockerRuntime } = await import('~/lib/runtime');
+      await getDockerRuntime().mkdir(relativePath, { recursive: true });
 
       this.files.setKey(folderPath, { type: 'folder' });
-
       logger.info(`Folder created: ${folderPath}`);
 
       return true;
@@ -844,19 +819,17 @@ export class FilesStore {
   }
 
   async deleteFile(filePath: string) {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, filePath);
+      const relativePath = path.relative(WORK_DIR, filePath) || filePath.replace(/^\/home\/project\/?/, '');
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid file path, delete '${relativePath}'`);
       }
 
-      await webcontainer.fs.rm(relativePath);
+      const { getDockerRuntime } = await import('~/lib/runtime');
+      await getDockerRuntime().exec(`rm -f ${JSON.stringify(relativePath)}`);
 
       this.#deletedPaths.add(filePath);
-
       this.files.setKey(filePath, undefined);
       this.#size--;
 
@@ -865,7 +838,6 @@ export class FilesStore {
       }
 
       this.#persistDeletedPaths();
-
       logger.info(`File deleted: ${filePath}`);
 
       return true;
@@ -876,41 +848,29 @@ export class FilesStore {
   }
 
   async deleteFolder(folderPath: string) {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, folderPath);
+      const relativePath = path.relative(WORK_DIR, folderPath) || folderPath.replace(/^\/home\/project\/?/, '');
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid folder path, delete '${relativePath}'`);
       }
 
-      await webcontainer.fs.rm(relativePath, { recursive: true });
+      const { getDockerRuntime } = await import('~/lib/runtime');
+      await getDockerRuntime().exec(`rm -rf ${JSON.stringify(relativePath)}`);
 
       this.#deletedPaths.add(folderPath);
 
-      this.files.setKey(folderPath, undefined);
+      for (const [pathKey] of Object.entries(this.files.get())) {
+        if (pathKey === folderPath || pathKey.startsWith(folderPath + '/')) {
+          this.files.setKey(pathKey, undefined);
 
-      const allFiles = this.files.get();
-
-      for (const [path, dirent] of Object.entries(allFiles)) {
-        if (path.startsWith(folderPath + '/')) {
-          this.files.setKey(path, undefined);
-
-          this.#deletedPaths.add(path);
-
-          if (dirent?.type === 'file') {
-            this.#size--;
-          }
-
-          if (dirent?.type === 'file' && this.#modifiedFiles.has(path)) {
-            this.#modifiedFiles.delete(path);
+          if (this.files.get()[pathKey]?.type === 'file' || true) {
+            this.#size = Math.max(0, this.#size - 1);
           }
         }
       }
 
       this.#persistDeletedPaths();
-
       logger.info(`Folder deleted: ${folderPath}`);
 
       return true;

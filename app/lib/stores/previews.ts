@@ -26,6 +26,7 @@ export class PreviewsStore {
   #refreshTimeouts = new Map<string, NodeJS.Timeout>();
   #REFRESH_DELAY = 300;
   #storageChannel?: BroadcastChannel;
+  #previewVerifyGeneration = 0;
 
   previews = atom<PreviewInfo[]>([]);
 
@@ -167,53 +168,96 @@ export class PreviewsStore {
   }
 
   async #init() {
-    // Always listen to WebContainer ports (default path / fallback)
-    void this.#initWebContainerPreviews();
-
-    // Also listen to Docker runtime previews when that target is active
+    // Docker-only previews — WebContainer port listeners removed
     void this.#initDockerPreviews();
   }
 
-  async #initWebContainerPreviews() {
-    const webcontainer = await this.#webcontainer;
+  #markPreviewUnreachable(baseUrl: string) {
+    const next = this.previews.get().map((p) => (p.baseUrl === baseUrl ? { ...p, ready: false } : p));
+    this.previews.set(next);
+  }
 
-    // Listen for server ready events
-    webcontainer.on('server-ready', (port, url) => {
-      console.log('[Preview] Server ready on port:', port, url);
-      this.broadcastUpdate(url);
+  async #verifyAndRecoverPreview(
+    runtime: Awaited<ReturnType<typeof import('~/lib/runtime').getDockerRuntime>>,
+    preview: { port: number; ready: boolean; baseUrl: string },
+  ) {
+    if (!preview.ready || !preview.baseUrl) {
+      return;
+    }
 
-      // Initial storage sync when preview is ready
-      this._broadcastStorageSync();
-    });
+    const { previewHealthStore, MAX_PREVIEW_AUTO_RETRIES } = await import('~/lib/stores/preview-health');
+    const { verifyPreviewReachable } = await import('~/lib/runtime');
 
-    // Listen for port events
-    webcontainer.on('port', (port, type, url) => {
-      let previewInfo = this.#availablePreviews.get(port);
+    const generation = ++this.#previewVerifyGeneration;
+    let retries = 0;
+    let currentUrl = preview.baseUrl;
 
-      if (type === 'close' && previewInfo) {
-        this.#availablePreviews.delete(port);
-        this.previews.set(this.previews.get().filter((preview) => preview.port !== port));
+    previewHealthStore.set({ status: 'checking', autoRetryCount: 0 });
 
+    while (retries <= MAX_PREVIEW_AUTO_RETRIES) {
+      if (generation !== this.#previewVerifyGeneration) {
         return;
       }
 
-      const previews = this.previews.get();
+      const reachable = await verifyPreviewReachable(currentUrl);
 
-      if (!previewInfo) {
-        previewInfo = { port, ready: type === 'open', baseUrl: url };
-        this.#availablePreviews.set(port, previewInfo);
-        previews.push(previewInfo);
+      if (reachable) {
+        previewHealthStore.set({ status: 'healthy', autoRetryCount: retries });
+        return;
       }
 
-      previewInfo.ready = type === 'open';
-      previewInfo.baseUrl = url;
-
-      this.previews.set([...previews]);
-
-      if (type === 'open') {
-        this.broadcastUpdate(url);
+      if (retries >= MAX_PREVIEW_AUTO_RETRIES) {
+        this.#markPreviewUnreachable(currentUrl);
+        previewHealthStore.set({
+          status: 'unreachable',
+          autoRetryCount: retries,
+          message: 'Preview URL did not respond. Try restarting the preview.',
+        });
+        return;
       }
-    });
+
+      previewHealthStore.set({
+        status: 'recovering',
+        autoRetryCount: retries,
+        message: 'Preview not responding — auto-retrying…',
+      });
+
+      retries += 1;
+      const recovered = await runtime.recoverPreview();
+
+      if (generation !== this.#previewVerifyGeneration) {
+        return;
+      }
+
+      if (!recovered?.ready || !recovered.baseUrl) {
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+
+      currentUrl = recovered.baseUrl;
+    }
+  }
+
+  async retryPreviewRecovery(): Promise<boolean> {
+    const { getDockerRuntime } = await import('~/lib/runtime');
+    const { previewHealthStore } = await import('~/lib/stores/preview-health');
+    const runtime = getDockerRuntime();
+
+    previewHealthStore.set({ status: 'recovering', autoRetryCount: 0, message: 'Restarting preview…' });
+
+    const recovered = await runtime.recoverPreview();
+
+    if (!recovered?.ready || !recovered.baseUrl) {
+      previewHealthStore.set({
+        status: 'unreachable',
+        autoRetryCount: 0,
+        message: 'Could not restart preview. Check Docker Desktop and the runtime daemon.',
+      });
+      return false;
+    }
+
+    await this.#verifyAndRecoverPreview(runtime, recovered);
+    return previewHealthStore.get().status === 'healthy';
   }
 
   async #initDockerPreviews() {
@@ -267,6 +311,7 @@ export class PreviewsStore {
 
         if (preview.ready) {
           console.log('[Preview] Docker preview ready:', preview.baseUrl);
+          void this.#verifyAndRecoverPreview(runtime, preview);
         }
       });
     } catch (error) {
@@ -401,4 +446,8 @@ export function usePreviewStore() {
   }
 
   return previewsStore;
+}
+
+export async function retryPreviewRecovery(): Promise<boolean> {
+  return usePreviewStore().retryPreviewRecovery();
 }

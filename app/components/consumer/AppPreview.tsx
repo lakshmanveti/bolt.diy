@@ -4,10 +4,13 @@ import { toast } from 'react-toastify';
 import type { ProgressAnnotation } from '~/types/context';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { dockerPreviewReloadToken } from '~/lib/runtime';
+import { previewHealthStore } from '~/lib/stores/preview-health';
+import { retryPreviewRecovery } from '~/lib/stores/previews';
 import { classNames } from '~/utils/classNames';
 import { Inspector, type ElementInfo } from '~/components/workbench/Inspector';
 import { BuildProgress } from './BuildProgress';
 import { ConsumerDeployButton } from './ConsumerDeployButton';
+import { BuildLiveLogo } from '~/components/ui/BuildLiveLogo';
 
 /**
  * Prefer direct Docker host ports over /embed proxies.
@@ -65,6 +68,14 @@ const iconBtn = (primary?: boolean, active?: boolean) =>
         : 'border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 text-bolt-elements-textPrimary hover:bg-bolt-elements-item-backgroundActive',
   );
 
+function PreviewBrandBadge() {
+  return (
+    <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-lg border border-bolt-elements-borderColor/50 bg-bolt-elements-background-depth-1/80 px-2.5 py-1.5 shadow-sm backdrop-blur-sm">
+      <span className="text-xs font-medium text-bolt-elements-textPrimary">Live Preview</span>
+    </div>
+  );
+}
+
 function PreviewToolbar({
   readyPreviews,
   activeIndex,
@@ -92,7 +103,9 @@ function PreviewToolbar({
 }) {
   return (
     <div className="flex items-center gap-2 px-3 py-2 border-b border-bolt-elements-borderColor shrink-0">
-      <span className="text-xs font-medium text-bolt-elements-textSecondary truncate flex-1">Live preview</span>
+      <div className="flex min-w-0 flex-1 items-center">
+        <BuildLiveLogo size="sm" />
+      </div>
 
       <div className="flex items-center gap-1.5 shrink-0">
         <a href="/" className={iconBtn(true)} title="New App" aria-label="New App">
@@ -251,6 +264,7 @@ function MobileFrame({
 export const AppPreview = memo(
   ({ annotations = [], isStreaming = false, setSelectedElement, promptSummary }: AppPreviewProps) => {
     const previews = useStore(workbenchStore.previews);
+    const previewHealth = useStore(previewHealthStore);
     const reloadToken = useStore(dockerPreviewReloadToken);
     const iframeRef = useRef<HTMLIFrameElement>(null);
     const [previewBust, setPreviewBust] = useState(() => Date.now());
@@ -341,6 +355,14 @@ export const AppPreview = memo(
       setPreviewBust(Date.now());
     }, []);
 
+    const retryPreview = useCallback(() => {
+      void retryPreviewRecovery().then((ok) => {
+        if (ok) {
+          setPreviewBust(Date.now());
+        }
+      });
+    }, []);
+
     const toggleInspector = useCallback(() => {
       setInspectorMode((prev) => {
         const next = !prev;
@@ -374,9 +396,12 @@ export const AppPreview = memo(
       return (
         <div className="flex h-full w-full flex-col bg-bolt-elements-background-depth-1">
           {toolbar}
+        <div className="relative flex flex-1 min-h-0">
+          <PreviewBrandBadge />
           <div className="flex flex-1 items-center justify-center px-6 py-10">
             <BuildProgress annotations={annotations} isStreaming={isStreaming} promptSummary={promptSummary} />
           </div>
+        </div>
         </div>
       );
     }
@@ -385,9 +410,43 @@ export const AppPreview = memo(
       <div className="flex h-full w-full flex-col bg-bolt-elements-background-depth-1">
         {toolbar}
         <div className="relative min-h-0 flex-1">
+          <PreviewBrandBadge />
           {inspectorMode && (
             <div className="pointer-events-none absolute left-3 right-3 top-3 z-10 rounded-md border border-accent-500/30 bg-accent-500/10 px-3 py-1.5 text-center text-xs text-bolt-elements-textPrimary backdrop-blur-sm">
               Click an element in the app, then describe the change in chat
+            </div>
+          )}
+
+          {(previewHealth.status === 'recovering' || previewHealth.status === 'unreachable') && (
+            <div
+              className="absolute inset-0 z-20 flex items-center justify-center bg-bolt-elements-background-depth-1/90 px-6 backdrop-blur-sm"
+              role="status"
+            >
+              <div className="max-w-sm text-center">
+                {previewHealth.status === 'recovering' ? (
+                  <div className="i-svg-spinners:90-ring-with-bg mx-auto mb-3 h-8 w-8 text-accent-500" />
+                ) : (
+                  <div className="i-ph:warning-circle mx-auto mb-3 h-8 w-8 text-red-500" />
+                )}
+                <p className="text-sm font-medium text-bolt-elements-textPrimary">
+                  {previewHealth.status === 'recovering' ? 'Fixing preview…' : 'Preview not responding'}
+                </p>
+                <p className="mt-1 text-xs text-bolt-elements-textSecondary">
+                  {previewHealth.message ||
+                    (previewHealth.status === 'recovering'
+                      ? 'Restarting the app server in Docker.'
+                      : 'The preview URL did not return a valid page.')}
+                </p>
+                {previewHealth.status === 'unreachable' && (
+                  <button
+                    type="button"
+                    className="mt-4 rounded-md bg-accent-500 px-4 py-2 text-sm font-medium text-white hover:bg-accent-600"
+                    onClick={retryPreview}
+                  >
+                    Retry preview
+                  </button>
+                )}
+              </div>
             </div>
           )}
 

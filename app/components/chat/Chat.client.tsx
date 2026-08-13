@@ -9,7 +9,19 @@ import { getDockerRuntime } from '~/lib/runtime';
 import { description, useChatHistory } from '~/lib/persistence';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROMPT_COOKIE_KEY, PROVIDER_LIST } from '~/utils/constants';
+import { getEnvBlockedLlmProviders, isBlockedLlmProvider } from '~/lib/modules/llm/defaults';
+import { authReadyStore, authUserStore, isSupabaseConfigured } from '~/lib/supabase/client';
+import {
+  chatLlmConfigReadyStore,
+  loadUserPreferences,
+  saveUserPreferences,
+  syncPreferencesToCookies,
+  userPreferencesReadyStore,
+  userPreferencesStore,
+  type UserPreferences,
+} from '~/lib/supabase/user-preferences';
+import { providersStore, updateProviderSettings } from '~/lib/stores/settings';
+import { DEFAULT_PROVIDER, PROMPT_COOKIE_KEY, PROVIDER_LIST } from '~/utils/constants';
 import { cubicEasingFn } from '~/utils/easings';
 import { createScopedLogger, renderLogger } from '~/utils/logger';
 import { BaseChat } from './BaseChat';
@@ -116,19 +128,114 @@ export const ChatImpl = memo(
     );
     const supabaseAlert = useStore(workbenchStore.supabaseAlert);
     const { activeProviders, promptId, autoSelectTemplate, contextOptimizationEnabled } = useSettings();
+    const authReady = useStore(authReadyStore);
+    const authUser = useStore(authUserStore);
+    const userPreferencesReady = useStore(userPreferencesReadyStore);
+    const chatLlmConfigReady = useStore(chatLlmConfigReadyStore);
+    const storedUserPreferences = useStore(userPreferencesStore);
     const [llmErrorAlert, setLlmErrorAlert] = useState<LlmErrorAlertType | undefined>(undefined);
-    const [model, setModel] = useState(() => {
-      const savedModel = Cookies.get('selectedModel');
-      return savedModel || DEFAULT_MODEL;
-    });
-    const [provider, setProvider] = useState(() => {
-      const savedProvider = Cookies.get('selectedProvider');
-      return (PROVIDER_LIST.find((p) => p.name === savedProvider) || DEFAULT_PROVIDER) as ProviderInfo;
-    });
+    const [model, setModel] = useState('');
+    const [provider, setProvider] = useState<ProviderInfo>(DEFAULT_PROVIDER as ProviderInfo);
+    const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
+
+    useEffect(() => {
+      if (!isSupabaseConfigured()) {
+        userPreferencesReadyStore.set(true);
+        const savedModel = Cookies.get('selectedModel');
+        const savedProvider = Cookies.get('selectedProvider');
+
+        if (savedModel && savedProvider && !isBlockedLlmProvider(savedProvider)) {
+          setModel(savedModel);
+          const p = PROVIDER_LIST.find((x) => x.name === savedProvider);
+
+          if (p) {
+            setProvider(p as ProviderInfo);
+          }
+        }
+
+        const storedApiKeys = Cookies.get('apiKeys');
+
+        if (storedApiKeys) {
+          try {
+            setApiKeys(JSON.parse(storedApiKeys));
+          } catch {
+            Cookies.remove('apiKeys');
+          }
+        }
+
+        chatLlmConfigReadyStore.set(Boolean(savedModel && savedProvider));
+        return;
+      }
+
+      if (!authReady || !authUser) {
+        return;
+      }
+
+      void loadUserPreferences();
+    }, [authReady, authUser?.id]);
+
+    useEffect(() => {
+      if (!storedUserPreferences) {
+        return;
+      }
+
+      const matchedProvider = PROVIDER_LIST.find((p) => p.name === storedUserPreferences.provider);
+
+      if (matchedProvider) {
+        setProvider(matchedProvider as ProviderInfo);
+      }
+
+      setModel(storedUserPreferences.model);
+      setApiKeys(storedUserPreferences.apiKeys);
+      syncPreferencesToCookies(storedUserPreferences);
+
+      if (storedUserPreferences.providerSettings) {
+        for (const [name, settings] of Object.entries(storedUserPreferences.providerSettings)) {
+          updateProviderSettings(name, { settings });
+        }
+      }
+    }, [storedUserPreferences]);
+
+    const persistPreferences = useCallback(
+      debounce(async (prefs: UserPreferences) => {
+        if (!isSupabaseConfigured() || !chatLlmConfigReady) {
+          return;
+        }
+
+        try {
+          const providerSettingsSnapshot = providersStore.get();
+          const providerSettings: UserPreferences['providerSettings'] = {};
+
+          for (const [name, entry] of Object.entries(providerSettingsSnapshot)) {
+            providerSettings[name] = entry.settings;
+          }
+
+          const saved = await saveUserPreferences({
+            ...prefs,
+            providerSettings,
+          });
+          syncPreferencesToCookies(saved);
+        } catch (error) {
+          logger.warn('Failed to persist user preferences', error);
+        }
+      }, 800),
+      [chatLlmConfigReady],
+    );
+
+    const handlePreferencesSaved = useCallback((prefs: UserPreferences) => {
+      const matchedProvider = PROVIDER_LIST.find((p) => p.name === prefs.provider);
+
+      if (matchedProvider) {
+        setProvider(matchedProvider as ProviderInfo);
+      }
+
+      setModel(prefs.model);
+      setApiKeys(prefs.apiKeys);
+      syncPreferencesToCookies(prefs);
+    }, []);
     const { showChat } = useStore(chatStore);
     const uiMode = useStore(consumerUiMode);
     const [animationScope, animate] = useAnimate();
-    const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
     const [chatMode, setChatMode] = useState<'discuss' | 'build'>('build');
     const [selectedElement, setSelectedElement] = useState<ElementInfo | null>(null);
     const mcpSettings = useMCPStore((state) => state.settings);
@@ -422,6 +529,16 @@ export const ChatImpl = memo(
         return;
       }
 
+      if (isSupabaseConfigured() && !chatLlmConfigReady) {
+        toast.error('Save your model and API key before chatting');
+        return;
+      }
+
+      if (!provider?.name || !model?.trim()) {
+        toast.error('Select a provider and model first');
+        return;
+      }
+
       if (isLoading) {
         abort();
         return;
@@ -605,22 +722,44 @@ export const ChatImpl = memo(
       [],
     );
 
-    useEffect(() => {
-      const storedApiKeys = Cookies.get('apiKeys');
-
-      if (storedApiKeys) {
-        setApiKeys(JSON.parse(storedApiKeys));
-      }
-    }, []);
-
     const handleModelChange = (newModel: string) => {
       setModel(newModel);
       Cookies.set('selectedModel', newModel, { expires: 30 });
+
+      if (provider?.name) {
+        persistPreferences({
+          provider: provider.name,
+          model: newModel,
+          apiKeys,
+        });
+      }
     };
 
     const handleProviderChange = (newProvider: ProviderInfo) => {
       setProvider(newProvider);
       Cookies.set('selectedProvider', newProvider.name, { expires: 30 });
+
+      if (model) {
+        persistPreferences({
+          provider: newProvider.name,
+          model,
+          apiKeys,
+        });
+      }
+    };
+
+    const handleApiKeysChange = (providerName: string, apiKey: string) => {
+      const next = { ...apiKeys, [providerName]: apiKey };
+      setApiKeys(next);
+      Cookies.set('apiKeys', JSON.stringify(next), { expires: 30 });
+
+      if (provider?.name && model) {
+        persistPreferences({
+          provider: provider.name,
+          model,
+          apiKeys: next,
+        });
+      }
     };
 
     const handleWebSearchResult = useCallback(
@@ -710,6 +849,10 @@ export const ChatImpl = memo(
         setSelectedElement={setSelectedElement}
         addToolResult={addToolResult}
         onWebSearchResult={handleWebSearchResult}
+        llmConfigReady={chatLlmConfigReady}
+        userPreferencesReady={userPreferencesReady}
+        onPreferencesSaved={handlePreferencesSaved}
+        onApiKeysChange={handleApiKeysChange}
       />
     );
   },

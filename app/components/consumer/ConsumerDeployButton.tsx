@@ -15,7 +15,7 @@ import { useGitHubDeploy } from '~/components/deploy/GitHubDeploy.client';
 import { useGitLabDeploy } from '~/components/deploy/GitLabDeploy.client';
 import { GitHubDeploymentDialog } from '~/components/deploy/GitHubDeploymentDialog';
 import { GitLabDeploymentDialog } from '~/components/deploy/GitLabDeploymentDialog';
-import { ControlPanel } from '~/components/@settings/core/ControlPanel';
+import { openSettingsTab } from '~/lib/stores/settings-modal';
 
 /**
  * Icon-only deploy control for the consumer preview toolbar.
@@ -37,7 +37,6 @@ export function ConsumerDeployButton() {
   const [gitlabDeploymentFiles, setGitlabDeploymentFiles] = useState<Record<string, string> | null>(null);
   const [githubProjectName, setGithubProjectName] = useState('');
   const [gitlabProjectName, setGitlabProjectName] = useState('');
-  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const { handleVercelDeploy } = useVercelDeploy();
   const { handleNetlifyDeploy } = useNetlifyDeploy();
@@ -170,7 +169,7 @@ export function ConsumerDeployButton() {
 
           <DropdownMenu.Item
             className="cursor-pointer flex items-center w-full px-4 py-2 text-sm text-bolt-elements-textPrimary hover:bg-bolt-elements-item-backgroundActive gap-2 rounded-md"
-            onClick={() => setSettingsOpen(true)}
+            onClick={() => openSettingsTab('github')}
           >
             <div className="i-ph:gear-six w-5 h-5" />
             <span className="flex-1">Configure integrations</span>
@@ -195,8 +194,6 @@ export function ConsumerDeployButton() {
           files={gitlabDeploymentFiles}
         />
       )}
-
-      <ControlPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </>
   );
 }

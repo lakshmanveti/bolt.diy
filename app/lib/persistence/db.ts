@@ -1,7 +1,18 @@
 import type { Message } from 'ai';
 import { createScopedLogger } from '~/utils/logger';
 import type { ChatHistoryItem } from './useChatHistory';
-import type { Snapshot } from './types'; // Import Snapshot type
+import type { Snapshot } from './types';
+import { isSupabaseConfigured } from '~/lib/supabase/client';
+import {
+  supabaseDeleteChat,
+  supabaseDeleteSnapshot,
+  supabaseGetAllChats,
+  supabaseGetChat,
+  supabaseGetNextId,
+  supabaseGetSnapshot,
+  supabaseSetSnapshot,
+  supabaseUpsertChat,
+} from './supabase-db';
 
 export interface IChatMetadata {
   gitUrl: string;
@@ -10,6 +21,14 @@ export interface IChatMetadata {
 }
 
 const logger = createScopedLogger('ChatHistory');
+
+async function cacheChatLocally(db: IDBDatabase, chat: ChatHistoryItem): Promise<void> {
+  await idbSetMessages(db, chat.id, chat.messages, chat.urlId, chat.description, chat.timestamp, chat.metadata);
+}
+
+async function syncWarn(action: string, error: unknown) {
+  logger.warn(`Supabase ${action} failed — IndexedDB kept as local cache`, error);
+}
 
 // this is used at the top level and never rejects
 export async function openDatabase(): Promise<IDBDatabase | undefined> {
@@ -51,7 +70,55 @@ export async function openDatabase(): Promise<IDBDatabase | undefined> {
   });
 }
 
-export async function getAll(db: IDBDatabase): Promise<ChatHistoryItem[]> {
+/**
+ * One-time push of local IndexedDB chats into Supabase when remote is empty.
+ * Safe to call on app boot.
+ */
+export async function migrateIndexedDbToSupabase(db: IDBDatabase): Promise<void> {
+  if (!isSupabaseConfigured()) {
+    return;
+  }
+
+  try {
+    const remote = await supabaseGetAllChats();
+
+    // null => not signed in or supabase unavailable — do not treat as empty remote
+    if (remote === null) {
+      return;
+    }
+
+    if (remote.length > 0) {
+      return;
+    }
+
+    const local = await idbGetAll(db);
+
+    for (const chat of local) {
+      await supabaseUpsertChat(
+        chat.id,
+        chat.messages,
+        chat.urlId,
+        chat.description,
+        chat.timestamp,
+        chat.metadata,
+      );
+
+      const snapshot = await idbGetSnapshot(db, chat.id);
+
+      if (snapshot) {
+        await supabaseSetSnapshot(chat.id, snapshot);
+      }
+    }
+
+    if (local.length > 0) {
+      logger.info(`Migrated ${local.length} local chat(s) to Supabase for signed-in user`);
+    }
+  } catch (error) {
+    syncWarn('migrate', error);
+  }
+}
+
+async function idbGetAll(db: IDBDatabase): Promise<ChatHistoryItem[]> {
   return new Promise((resolve, reject) => {
     const transaction = db.transaction('chats', 'readonly');
     const store = transaction.objectStore('chats');
@@ -62,7 +129,27 @@ export async function getAll(db: IDBDatabase): Promise<ChatHistoryItem[]> {
   });
 }
 
-export async function setMessages(
+export async function getAll(db: IDBDatabase): Promise<ChatHistoryItem[]> {
+  if (isSupabaseConfigured()) {
+    try {
+      const remote = await supabaseGetAllChats();
+
+      if (remote) {
+        for (const chat of remote) {
+          await cacheChatLocally(db, chat);
+        }
+
+        return remote;
+      }
+    } catch (error) {
+      syncWarn('getAll', error);
+    }
+  }
+
+  return idbGetAll(db);
+}
+
+async function idbSetMessages(
   db: IDBDatabase,
   id: string,
   messages: Message[],
@@ -94,7 +181,40 @@ export async function setMessages(
   });
 }
 
+export async function setMessages(
+  db: IDBDatabase,
+  id: string,
+  messages: Message[],
+  urlId?: string,
+  description?: string,
+  timestamp?: string,
+  metadata?: IChatMetadata,
+): Promise<void> {
+  await idbSetMessages(db, id, messages, urlId, description, timestamp, metadata);
+
+  if (isSupabaseConfigured()) {
+    try {
+      await supabaseUpsertChat(id, messages, urlId, description, timestamp, metadata);
+    } catch (error) {
+      syncWarn('setMessages', error);
+    }
+  }
+}
+
 export async function getMessages(db: IDBDatabase, id: string): Promise<ChatHistoryItem> {
+  if (isSupabaseConfigured()) {
+    try {
+      const remote = await supabaseGetChat(id);
+
+      if (remote) {
+        await cacheChatLocally(db, remote);
+        return remote;
+      }
+    } catch (error) {
+      syncWarn('getMessages', error);
+    }
+  }
+
   return (await getMessagesById(db, id)) || (await getMessagesByUrlId(db, id));
 }
 
@@ -121,14 +241,14 @@ export async function getMessagesById(db: IDBDatabase, id: string): Promise<Chat
   });
 }
 
-export async function deleteById(db: IDBDatabase, id: string): Promise<void> {
+async function idbDeleteById(db: IDBDatabase, id: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(['chats', 'snapshots'], 'readwrite'); // Add snapshots store to transaction
+    const transaction = db.transaction(['chats', 'snapshots'], 'readwrite');
     const chatStore = transaction.objectStore('chats');
     const snapshotStore = transaction.objectStore('snapshots');
 
     const deleteChatRequest = chatStore.delete(id);
-    const deleteSnapshotRequest = snapshotStore.delete(id); // Also delete snapshot
+    const deleteSnapshotRequest = snapshotStore.delete(id);
 
     let chatDeleted = false;
     let snapshotDeleted = false;
@@ -159,14 +279,39 @@ export async function deleteById(db: IDBDatabase, id: string): Promise<void> {
       }
     };
 
-    transaction.oncomplete = () => {
-      // This might resolve before checkCompletion if one operation finishes much faster
-    };
     transaction.onerror = () => reject(transaction.error);
   });
 }
 
+export async function deleteById(db: IDBDatabase, id: string): Promise<void> {
+  await idbDeleteById(db, id);
+
+  if (isSupabaseConfigured()) {
+    try {
+      await supabaseDeleteChat(id);
+    } catch (error) {
+      syncWarn('deleteById', error);
+    }
+  }
+}
+
 export async function getNextId(db: IDBDatabase): Promise<string> {
+  if (isSupabaseConfigured()) {
+    try {
+      const remoteNext = await supabaseGetNextId();
+      const localNext = await idbGetNextId(db);
+      const next = String(Math.max(Number(remoteNext || 0), Number(localNext || 0)));
+
+      return next === '0' ? '1' : next;
+    } catch (error) {
+      syncWarn('getNextId', error);
+    }
+  }
+
+  return idbGetNextId(db);
+}
+
+async function idbGetNextId(db: IDBDatabase): Promise<string> {
   return new Promise((resolve, reject) => {
     const transaction = db.transaction('chats', 'readonly');
     const store = transaction.objectStore('chats');
@@ -186,18 +331,30 @@ export async function getUrlId(db: IDBDatabase, id: string): Promise<string> {
 
   if (!idList.includes(id)) {
     return id;
-  } else {
-    let i = 2;
-
-    while (idList.includes(`${id}-${i}`)) {
-      i++;
-    }
-
-    return `${id}-${i}`;
   }
+
+  let i = 2;
+
+  while (idList.includes(`${id}-${i}`)) {
+    i++;
+  }
+
+  return `${id}-${i}`;
 }
 
 async function getUrlIds(db: IDBDatabase): Promise<string[]> {
+  if (isSupabaseConfigured()) {
+    try {
+      const remote = await supabaseGetAllChats();
+
+      if (remote) {
+        return remote.map((c) => c.urlId).filter((x): x is string => Boolean(x));
+      }
+    } catch (error) {
+      syncWarn('getUrlIds', error);
+    }
+  }
+
   return new Promise((resolve, reject) => {
     const transaction = db.transaction('chats', 'readonly');
     const store = transaction.objectStore('chats');
@@ -229,14 +386,12 @@ export async function forkChat(db: IDBDatabase, chatId: string, messageId: strin
     throw new Error('Chat not found');
   }
 
-  // Find the index of the message to fork at
   const messageIndex = chat.messages.findIndex((msg) => msg.id === messageId);
 
   if (messageIndex === -1) {
     throw new Error('Message not found');
   }
 
-  // Get messages up to and including the selected message
   const messages = chat.messages.slice(0, messageIndex + 1);
 
   return createChatFromMessages(db, chat.description ? `${chat.description} (fork)` : 'Forked chat', messages);
@@ -259,19 +414,11 @@ export async function createChatFromMessages(
   metadata?: IChatMetadata,
 ): Promise<string> {
   const newId = await getNextId(db);
-  const newUrlId = await getUrlId(db, newId); // Get a new urlId for the duplicated chat
+  const newUrlId = await getUrlId(db, newId);
 
-  await setMessages(
-    db,
-    newId,
-    messages,
-    newUrlId, // Use the new urlId
-    description,
-    undefined, // Use the current timestamp
-    metadata,
-  );
+  await setMessages(db, newId, messages, newUrlId, description, undefined, metadata);
 
-  return newUrlId; // Return the urlId instead of id for navigation
+  return newUrlId;
 }
 
 export async function updateChatDescription(db: IDBDatabase, id: string, description: string): Promise<void> {
@@ -302,7 +449,7 @@ export async function updateChatMetadata(
   await setMessages(db, id, chat.messages, chat.urlId, chat.description, chat.timestamp, metadata);
 }
 
-export async function getSnapshot(db: IDBDatabase, chatId: string): Promise<Snapshot | undefined> {
+async function idbGetSnapshot(db: IDBDatabase, chatId: string): Promise<Snapshot | undefined> {
   return new Promise((resolve, reject) => {
     const transaction = db.transaction('snapshots', 'readonly');
     const store = transaction.objectStore('snapshots');
@@ -313,7 +460,24 @@ export async function getSnapshot(db: IDBDatabase, chatId: string): Promise<Snap
   });
 }
 
-export async function setSnapshot(db: IDBDatabase, chatId: string, snapshot: Snapshot): Promise<void> {
+export async function getSnapshot(db: IDBDatabase, chatId: string): Promise<Snapshot | undefined> {
+  if (isSupabaseConfigured()) {
+    try {
+      const remote = await supabaseGetSnapshot(chatId);
+
+      if (remote) {
+        await idbSetSnapshot(db, chatId, remote);
+        return remote;
+      }
+    } catch (error) {
+      syncWarn('getSnapshot', error);
+    }
+  }
+
+  return idbGetSnapshot(db, chatId);
+}
+
+async function idbSetSnapshot(db: IDBDatabase, chatId: string, snapshot: Snapshot): Promise<void> {
   return new Promise((resolve, reject) => {
     const transaction = db.transaction('snapshots', 'readwrite');
     const store = transaction.objectStore('snapshots');
@@ -324,8 +488,20 @@ export async function setSnapshot(db: IDBDatabase, chatId: string, snapshot: Sna
   });
 }
 
+export async function setSnapshot(db: IDBDatabase, chatId: string, snapshot: Snapshot): Promise<void> {
+  await idbSetSnapshot(db, chatId, snapshot);
+
+  if (isSupabaseConfigured()) {
+    try {
+      await supabaseSetSnapshot(chatId, snapshot);
+    } catch (error) {
+      syncWarn('setSnapshot', error);
+    }
+  }
+}
+
 export async function deleteSnapshot(db: IDBDatabase, chatId: string): Promise<void> {
-  return new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     const transaction = db.transaction('snapshots', 'readwrite');
     const store = transaction.objectStore('snapshots');
     const request = store.delete(chatId);
@@ -340,4 +516,12 @@ export async function deleteSnapshot(db: IDBDatabase, chatId: string): Promise<v
       }
     };
   });
+
+  if (isSupabaseConfigured()) {
+    try {
+      await supabaseDeleteSnapshot(chatId);
+    } catch (error) {
+      syncWarn('deleteSnapshot', error);
+    }
+  }
 }

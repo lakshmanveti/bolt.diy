@@ -3,9 +3,8 @@ import type { ITerminal } from '~/types/terminal';
 import { workbenchStore } from '~/lib/stores/workbench';
 
 /**
- * Initializes the Bolt shell without rendering the IDE terminal UI.
- * Shell/start actions require an attached terminal; without this, consumer mode
- * never runs `npm install` / `npm run dev` and the preview stays empty.
+ * Previously spawned WebContainer jsh for consumer shell/start actions.
+ * Docker ActionRunner uses the runtime daemon directly — no headless terminal needed.
  */
 export function HeadlessBoltTerminal() {
   const startedRef = useRef(false);
@@ -15,12 +14,12 @@ export function HeadlessBoltTerminal() {
       return;
     }
 
-    // Already initialized by studio workbench (or a previous mount)
+    startedRef.current = true;
+
+    // Keep a no-op terminal attached so any legacy callers don't throw
     if (workbenchStore.boltTerminal.process) {
       return;
     }
-
-    startedRef.current = true;
 
     const listeners = new Set<(data: string) => void>();
 

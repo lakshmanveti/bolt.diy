@@ -10,6 +10,10 @@ import { DndProvider } from 'react-dnd';
 import { HTML5Backend } from 'react-dnd-html5-backend';
 import { ClientOnly } from 'remix-utils/client-only';
 import { cssTransition, ToastContainer } from 'react-toastify';
+import { AuthBootstrap } from '~/components/auth/AuthButton';
+import { SettingsTabModal } from '~/components/@settings/core/SettingsTabModal';
+import { AuthGate } from '~/components/auth/AuthGate.client';
+import { AuthLoadingScreen } from '~/components/auth/AuthLoadingScreen';
 import { RuntimeHealthPoller } from '~/components/runtime/RuntimeHealthPoller.client';
 
 import reactToastifyStyles from 'react-toastify/dist/ReactToastify.css?url';
@@ -85,11 +89,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
         Must render `children` on the server. Wrapping Outlet in ClientOnly with no
         fallback produced an empty document (Toastify only) and a blank browser.
       */}
-      <ClientOnly fallback={children}>
+      <ClientOnly fallback={<AuthLoadingScreen />}>
         {() => (
           <DndProvider backend={HTML5Backend}>
             <RuntimeHealthPoller />
-            {children}
+            <AuthBootstrap />
+            <SettingsTabModal />
+            <AuthGate>{children}</AuthGate>
           </DndProvider>
         )}
       </ClientOnly>

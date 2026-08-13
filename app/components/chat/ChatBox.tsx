@@ -66,22 +66,20 @@ interface ChatBoxProps {
   setSelectedElement?: ((element: ElementInfo | null) => void) | undefined;
   /** Consumer UI: attachment + voice only. Studio keeps the full toolbar. */
   toolbarMode?: 'full' | 'minimal';
+  chatInputDisabled?: boolean;
 }
 
 export const ChatBox: React.FC<ChatBoxProps> = (props) => {
   return (
     <div
       className={classNames(
-        'relative bg-bolt-elements-background-depth-2 backdrop-blur p-3 rounded-lg border border-bolt-elements-borderColor relative w-full max-w-chat mx-auto z-prompt',
-
-        /*
-         * {
-         *   'sticky bottom-2': chatStarted,
-         * },
-         */
+        'relative w-full max-w-chat mx-auto z-prompt',
+        props.toolbarMode === 'minimal'
+          ? 'bg-transparent p-0 border-0'
+          : 'bg-bolt-elements-background-depth-2 backdrop-blur p-3 rounded-lg border border-bolt-elements-borderColor',
       )}
     >
-      <svg className={classNames(styles.PromptEffectContainer)}>
+      <svg className={classNames(styles.PromptEffectContainer, props.toolbarMode === 'minimal' && 'hidden')}>
         <defs>
           <linearGradient
             id="line-gradient"
@@ -241,7 +239,15 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
             minHeight: props.TEXTAREA_MIN_HEIGHT,
             maxHeight: props.TEXTAREA_MAX_HEIGHT,
           }}
-          placeholder={props.chatMode === 'build' ? APP_CHAT_PLACEHOLDER : 'What would you like to discuss?'}
+          placeholder={
+            props.chatInputDisabled
+              ? 'Save your model and API key above to start chatting…'
+              : props.chatMode === 'build'
+                ? APP_CHAT_PLACEHOLDER
+                : 'What would you like to discuss?'
+          }
+          disabled={props.chatInputDisabled}
+          readOnly={props.chatInputDisabled}
           translate="no"
         />
         <ClientOnly>
@@ -249,7 +255,7 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
             <SendButton
               show={props.input.length > 0 || props.isStreaming || props.uploadedFiles.length > 0}
               isStreaming={props.isStreaming}
-              disabled={!props.providerList || props.providerList.length === 0}
+              disabled={props.chatInputDisabled || !props.providerList || props.providerList.length === 0}
               onClick={(event) => {
                 if (props.isStreaming) {
                   props.handleStop?.();
@@ -332,7 +338,7 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
                     !props.isModelSettingsCollapsed,
                 })}
                 onClick={() => props.setIsModelSettingsCollapsed(!props.isModelSettingsCollapsed)}
-                disabled={!props.providerList || props.providerList.length === 0}
+                disabled={props.chatInputDisabled || !props.providerList || props.providerList.length === 0}
               >
                 <div className={`i-ph:caret-${props.isModelSettingsCollapsed ? 'right' : 'down'} text-lg`} />
                 {props.isModelSettingsCollapsed ? <span className="text-xs">{props.model}</span> : <span />}

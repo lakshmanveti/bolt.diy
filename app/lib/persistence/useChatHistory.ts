@@ -1,6 +1,7 @@
 import { useLoaderData, useNavigate, useSearchParams } from '@remix-run/react';
 import { useState, useEffect, useCallback } from 'react';
 import { atom } from 'nanostores';
+import { useStore } from '@nanostores/react';
 import { generateId, type JSONValue, type Message } from 'ai';
 import { toast } from 'react-toastify';
 import { workbenchStore } from '~/lib/stores/workbench';
@@ -15,11 +16,13 @@ import {
   createChatFromMessages,
   getSnapshot,
   setSnapshot,
+  migrateIndexedDbToSupabase,
   type IChatMetadata,
 } from './db';
+import { authReadyStore, authUserStore, isSupabaseConfigured } from '~/lib/supabase/client';
 import type { FileMap } from '~/lib/stores/files';
 import type { Snapshot } from './types';
-import { getWebContainerPromise, getEffectiveExecutionTarget, getDockerRuntime, isDockerRuntimeAvailable } from '~/lib/runtime';
+import { getEffectiveExecutionTarget, getDockerRuntime, isDockerRuntimeAvailable } from '~/lib/runtime';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
 import { APP_NAME } from '~/utils/brand';
@@ -44,6 +47,8 @@ export function useChatHistory() {
   const navigate = useNavigate();
   const { id: mixedId } = useLoaderData<{ id?: string }>();
   const [searchParams] = useSearchParams();
+  const authReady = useStore(authReadyStore);
+  const authUser = useStore(authUserStore);
 
   const [archivedMessages, setArchivedMessages] = useState<Message[]>([]);
   const [initialMessages, setInitialMessages] = useState<Message[]>([]);
@@ -61,6 +66,15 @@ export function useChatHistory() {
       }
 
       return;
+    }
+
+    // Wait for auth hydration so we don't miss Supabase reads on first paint
+    if (isSupabaseConfigured() && !authReady) {
+      return;
+    }
+
+    if (isSupabaseConfigured() && authUser) {
+      void migrateIndexedDbToSupabase(db);
     }
 
     if (mixedId) {
@@ -250,7 +264,7 @@ ${value.content}
       // Handle case where there is no mixedId (e.g., new chat)
       setReady(true);
     }
-  }, [mixedId, db, navigate, searchParams]); // Added db, navigate, searchParams dependencies
+  }, [mixedId, db, navigate, searchParams, authReady, authUser?.id]); // auth so Supabase reads run after session hydrate
 
   const takeSnapshot = useCallback(
     async (chatIdx: string, files: FileMap, _chatId?: string | undefined, chatSummary?: string) => {
@@ -277,37 +291,21 @@ ${value.content}
     [db],
   );
 
-  const restoreSnapshot = useCallback(async (id: string, snapshot?: Snapshot) => {
-    // const snapshotStr = localStorage.getItem(`snapshot:${id}`); // Remove localStorage usage
-    const container = await getWebContainerPromise();
-
+  const restoreSnapshot = useCallback(async (_id: string, snapshot?: Snapshot) => {
+    // Docker owns project files on disk. Hydrate the in-memory editor/ZIP cache from the snapshot.
     const validSnapshot = snapshot || { chatIndex: '', files: {} };
 
     if (!validSnapshot?.files) {
       return;
     }
 
-    Object.entries(validSnapshot.files).forEach(async ([key, value]) => {
-      if (key.startsWith(container.workdir)) {
-        key = key.replace(container.workdir, '');
-      }
+    const { workbenchStore } = await import('~/lib/stores/workbench');
 
-      if (value?.type === 'folder') {
-        await container.fs.mkdir(key, { recursive: true });
+    for (const [key, value] of Object.entries(validSnapshot.files)) {
+      if (value?.type === 'file' && typeof value.content === 'string') {
+        workbenchStore.hydrateFileFromSnapshot(key, value.content);
       }
-    });
-    Object.entries(validSnapshot.files).forEach(async ([key, value]) => {
-      if (value?.type === 'file') {
-        if (key.startsWith(container.workdir)) {
-          key = key.replace(container.workdir, '');
-        }
-
-        await container.fs.writeFile(key, value.content, { encoding: value.isBinary ? undefined : 'utf8' });
-      } else {
-      }
-    });
-
-    // workbenchStore.files.setKey(snapshot?.files)
+    }
   }, []);
 
   return {

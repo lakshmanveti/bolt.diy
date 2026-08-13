@@ -1,7 +1,6 @@
 import React from 'react';
 import { Button } from '~/components/ui/Button';
 import { Card, CardContent, CardHeader } from '~/components/ui/Card';
-import { APP_NAME } from '~/utils/brand';
 import {
   Cpu,
   Server,
@@ -418,7 +417,7 @@ function SetupGuide({ onBack }: { onBack: () => void }) {
                 </div>
                 <div className="space-y-2">
                   <p className="text-xs text-bolt-elements-textSecondary">
-                    To work with {APP_NAME}, you MUST enable CORS in LM Studio:
+                    To connect local models, you MUST enable CORS in LM Studio:
                   </p>
                   <ol className="text-xs text-bolt-elements-textSecondary space-y-1 list-decimal list-inside ml-2">
                     <li>In Server Settings, check "Enable CORS"</li>

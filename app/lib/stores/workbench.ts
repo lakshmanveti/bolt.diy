@@ -2,7 +2,7 @@ import { atom, map, type MapStore, type ReadableAtom, type WritableAtom } from '
 import type { EditorDocument, ScrollPosition } from '~/components/editor/codemirror/CodeMirrorEditor';
 import { ActionRunner } from '~/lib/runtime/action-runner';
 import type { ActionCallbackData, ArtifactCallbackData } from '~/lib/runtime/message-parser';
-import { getWebContainerPromise, getEffectiveExecutionTarget } from '~/lib/runtime';
+import { getEffectiveExecutionTarget } from '~/lib/runtime';
 import type { ITerminal } from '~/types/terminal';
 import { unreachable } from '~/utils/unreachable';
 import { EditorStore } from './editor';
@@ -18,11 +18,15 @@ import { description } from '~/lib/persistence';
 import Cookies from 'js-cookie';
 import { createSampler } from '~/utils/sampler';
 import type { ActionAlert, DeployAlert, SupabaseAlert } from '~/types/actions';
+import { WORK_DIR } from '~/utils/constants';
 
 const { saveAs } = fileSaver;
 
-/** M1: WC via runtime accessor (same promise as before when target=webcontainer). */
-const webcontainer = getWebContainerPromise();
+/** Legacy WC promise stub — ActionRunner Docker path does not await it for file/shell/start. */
+const webcontainer = Promise.reject(
+  new Error('WebContainer disabled — Docker runtime is required'),
+) as Promise<never>;
+webcontainer.catch(() => undefined);
 
 export interface ArtifactState {
   id: string;
@@ -92,6 +96,10 @@ export class WorkbenchStore {
 
   get files() {
     return this.#filesStore.files;
+  }
+
+  hydrateFileFromSnapshot(filePath: string, content: string) {
+    this.#filesStore.applyRemoteWrite(filePath, content);
   }
 
   get currentDocument(): ReadableAtom<EditorDocument | undefined> {
@@ -573,8 +581,7 @@ export class WorkbenchStore {
     }
 
     if (data.action.type === 'file') {
-      const wc = await webcontainer;
-      const fullPath = path.join(wc.workdir, data.action.filePath);
+      const fullPath = path.join(WORK_DIR, data.action.filePath.replace(/^\//, ''));
 
       /*
        * For scoped locks, we would need to implement diff checking here
@@ -598,8 +605,10 @@ export class WorkbenchStore {
       }
 
       this.#editorStore.updateFile(fullPath, data.action.content);
+      this.#filesStore.applyRemoteWrite(fullPath, data.action.content);
 
       if (!isStreaming && data.action.content) {
+        // Persist editor buffer in memory only (Docker volume written by ActionRunner)
         await this.saveFile(fullPath);
       }
 

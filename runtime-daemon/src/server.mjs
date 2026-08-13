@@ -304,7 +304,9 @@ async function resolvePreview(session) {
       const res = await fetch(originUrl, { signal: controller.signal });
       clearTimeout(timer);
 
-      if (res.ok || res.status === 404 || res.status === 304) {
+      // Treat only successful/redirect HTTP responses as preview-ready.
+      // A 404 at "/" usually means the app server is not serving a web UI yet.
+      if (res.ok || (res.status >= 300 && res.status < 400)) {
         session.preview = { ...candidate, ready: true };
         return session.preview;
       }
@@ -681,6 +683,62 @@ export default defineConfig({
 `,
   );
 
+  const hasAppTsx = await pathExistsInSession(session, 'src/App.tsx');
+  const hasAppJsx = await pathExistsInSession(session, 'src/App.jsx');
+  const hasMainTsx = await pathExistsInSession(session, 'src/main.tsx');
+  const hasMainJsx = await pathExistsInSession(session, 'src/main.jsx');
+  const hasIndexHtml = await pathExistsInSession(session, 'index.html');
+
+  if (!hasAppTsx && !hasAppJsx) {
+    await writeFileIfChanged(
+      path.join(session.workdir, 'src', 'App.jsx'),
+      `export default function App() {
+  return (
+    <main style={{ fontFamily: 'system-ui, sans-serif', padding: 24 }}>
+      <h1>Hello from BuildLive</h1>
+      <p>Your app preview is running in Docker.</p>
+    </main>
+  );
+}
+`,
+    );
+  }
+
+  if (!hasMainTsx && !hasMainJsx) {
+    const appImport = hasAppTsx ? './App.tsx' : './App.jsx';
+    const cssImport = (await pathExistsInSession(session, 'src/index.css')) ? "import './index.css';\n" : '';
+    const mainSource = `${cssImport}import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from '${appImport}';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);
+`;
+    await writeFileIfChanged(path.join(session.workdir, 'src', 'main.jsx'), mainSource);
+  }
+
+  if (!hasIndexHtml) {
+    await writeFileIfChanged(
+      path.join(session.workdir, 'index.html'),
+      `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BuildLive App</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+`,
+    );
+  }
+
   const hasNodeModules = await pathExistsInSession(session, 'node_modules');
   if (hasNodeModules) {
     return 'npm run dev -- --host 0.0.0.0 --port 5173';
@@ -745,10 +803,10 @@ async function waitForPreview(session, attempts = 30, delayMs = 700) {
 }
 
 async function stopAppProcesses(session) {
-  await dockerExec(
-    session,
-    "bash -lc 'killall -9 node python3 vite 2>/dev/null || true; sleep 0.2; true'",
-  );
+  await dockerExec(session, "bash -lc 'pkill -9 -f \"vite|next|react-scripts|buildlive-static-server|http.server\" 2>/dev/null || true'");
+  await dockerExec(session, "bash -lc 'pkill -9 -x node 2>/dev/null || true'");
+  await dockerExec(session, "bash -lc 'for p in 5173 3000 4173 8080 5000 4321; do (command -v fuser >/dev/null 2>&1 && fuser -k ${p}/tcp >/dev/null 2>&1) || true; done'");
+  await dockerExec(session, 'sleep 0.2');
 }
 
 /**

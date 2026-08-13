@@ -5,7 +5,8 @@
 
 export type DeploymentTarget = 'webcontainer' | 'docker';
 
-export const DEFAULT_DEPLOYMENT_TARGET: DeploymentTarget = 'webcontainer';
+/** BuildLive runs generated apps in Docker only. */
+export const DEFAULT_DEPLOYMENT_TARGET: DeploymentTarget = 'docker';
 
 export const DEFAULT_RUNTIME_DAEMON_URL = 'http://127.0.0.1:7788';
 

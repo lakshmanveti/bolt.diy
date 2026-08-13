@@ -4,7 +4,6 @@ import { motion } from 'framer-motion';
 import { Switch } from '~/components/ui/Switch';
 import { useSettings } from '~/lib/hooks/useSettings';
 import { useDeploymentTarget } from '~/lib/hooks/useDeploymentTarget';
-import type { DeploymentTarget } from '~/lib/runtime';
 import { classNames } from '~/utils/classNames';
 import { toast } from 'react-toastify';
 import { PromptLibrary } from '~/lib/common/prompt-library';
@@ -121,7 +120,7 @@ export default function FeaturesTab() {
     promptId,
   } = useSettings();
 
-  const { deploymentTarget, setDeploymentTarget, dockerAvailable, usingFallback } = useDeploymentTarget();
+  const { dockerAvailable } = useDeploymentTarget();
 
   // Enable features by default on first load
   React.useEffect(() => {
@@ -181,29 +180,6 @@ export default function FeaturesTab() {
     [enableLatestBranch, setAutoSelectTemplate, enableContextOptimization, setEventLogs],
   );
 
-  const handleSelectRuntime = useCallback(
-    (target: DeploymentTarget) => {
-      if (target === deploymentTarget) {
-        return;
-      }
-
-      setDeploymentTarget(target);
-
-      if (target === 'webcontainer') {
-        toast.success('Preview runtime set to WebContainer');
-        return;
-      }
-
-      if (!dockerAvailable) {
-        toast.info('Docker selected. Start the runtime daemon (`pnpm runtime:daemon`) with Docker Desktop running.');
-        return;
-      }
-
-      toast.success('Preview runtime set to Docker');
-    },
-    [deploymentTarget, setDeploymentTarget, dockerAvailable],
-  );
-
   const features = {
     stable: [
       {
@@ -242,30 +218,6 @@ export default function FeaturesTab() {
     beta: [],
   };
 
-  const runtimeOptions: Array<{
-    id: DeploymentTarget;
-    title: string;
-    description: string;
-    icon: string;
-    badge?: string;
-  }> = [
-    {
-      id: 'webcontainer',
-      title: 'WebContainer',
-      description: 'Run builds in the browser (default). Same behavior as today.',
-      icon: 'i-ph:browser',
-    },
-    {
-      id: 'docker',
-      title: 'Docker',
-      description: dockerAvailable
-        ? 'Run builds in a local Docker container via the runtime daemon.'
-        : 'Requires Docker Desktop + `pnpm runtime:daemon`. Falls back to WebContainer while offline.',
-      icon: 'i-ph:package',
-      badge: dockerAvailable ? 'Ready' : 'Daemon offline',
-    },
-  ];
-
   return (
     <div className="flex flex-col gap-8">
       <FeatureSection
@@ -294,82 +246,44 @@ export default function FeaturesTab() {
         transition={{ duration: 0.3 }}
       >
         <div className="flex items-center gap-3">
-          <div className="i-ph:cube text-xl text-purple-500" />
+          <div className="i-ph:package text-xl text-purple-500" />
           <div>
             <h3 className="text-lg font-medium text-bolt-elements-textPrimary">Preview runtime</h3>
             <p className="text-sm text-bolt-elements-textSecondary">
-              Choose where generated apps run. Default is WebContainer.
+              Generated apps run in Docker via the local runtime daemon.
             </p>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {runtimeOptions.map((option, index) => {
-            const selected = deploymentTarget === option.id;
-
-            return (
-              <motion.button
-                key={option.id}
-                type="button"
-                layoutId={`runtime-${option.id}`}
-                onClick={() => handleSelectRuntime(option.id)}
-                className={classNames(
-                  'text-left relative group cursor-pointer',
-                  'bg-bolt-elements-background-depth-2',
-                  'hover:bg-bolt-elements-background-depth-3',
-                  'transition-colors duration-200',
-                  'rounded-lg overflow-hidden border',
-                  selected
-                    ? 'border-purple-500/50 ring-1 ring-purple-500/30'
-                    : 'border-transparent',
-                )}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: index * 0.1 }}
-              >
-                <div className="p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <div className={classNames(option.icon, 'w-5 h-5 text-bolt-elements-textSecondary')} />
-                      <div className="flex items-center gap-2">
-                        <h4 className="font-medium text-bolt-elements-textPrimary">{option.title}</h4>
-                        {option.badge && (
-                          <span
-                            className={classNames(
-                              'px-2 py-0.5 text-xs rounded-full font-medium',
-                              option.badge === 'Ready'
-                                ? 'bg-green-500/10 text-green-500'
-                                : 'bg-orange-500/10 text-orange-500',
-                            )}
-                          >
-                            {option.badge}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div
-                      className={classNames(
-                        'w-4 h-4 rounded-full border-2 flex items-center justify-center',
-                        selected ? 'border-purple-500' : 'border-bolt-elements-borderColor',
-                      )}
-                    >
-                      {selected && <div className="w-2 h-2 rounded-full bg-purple-500" />}
-                    </div>
-                  </div>
-                  <p className="mt-2 text-sm text-bolt-elements-textSecondary">{option.description}</p>
-                </div>
-              </motion.button>
-            );
-          })}
+        <div
+          className={classNames(
+            'bg-bolt-elements-background-depth-2',
+            'rounded-lg overflow-hidden border border-bolt-elements-borderColor',
+            'p-4',
+          )}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="i-ph:package w-5 h-5 text-bolt-elements-textSecondary" />
+              <div>
+                <h4 className="font-medium text-bolt-elements-textPrimary">Docker</h4>
+                <p className="mt-1 text-sm text-bolt-elements-textSecondary">
+                  {dockerAvailable
+                    ? 'Runtime daemon connected. Previews run in a local container.'
+                    : 'Start Docker Desktop and `pnpm runtime:daemon` to enable live previews.'}
+                </p>
+              </div>
+            </div>
+            <span
+              className={classNames(
+                'px-2 py-0.5 text-xs rounded-full font-medium shrink-0',
+                dockerAvailable ? 'bg-green-500/10 text-green-500' : 'bg-orange-500/10 text-orange-500',
+              )}
+            >
+              {dockerAvailable ? 'Ready' : 'Daemon offline'}
+            </span>
+          </div>
         </div>
-
-        {usingFallback && (
-          <p className="text-xs text-bolt-elements-textTertiary">
-            Docker is selected, but the runtime daemon is offline. Start it with{' '}
-            <code className="text-bolt-elements-textSecondary">pnpm runtime:daemon</code> (Docker Desktop required).
-            Builds fall back to WebContainer until then.
-          </p>
-        )}
       </motion.div>
 
       <motion.div

@@ -1,7 +1,6 @@
 import type { Message } from 'ai';
 import { Fragment, forwardRef, type ForwardedRef } from 'react';
 import { classNames } from '~/utils/classNames';
-import { UserMessage } from '~/components/chat/UserMessage';
 import { MODEL_REGEX, PROVIDER_REGEX } from '~/utils/constants';
 import { ConsumerMarkdown } from './ConsumerMarkdown';
 import type { ProviderInfo } from '~/types/model';
@@ -13,6 +12,7 @@ import type {
   FileUIPart,
   StepStartUIPart,
 } from '@ai-sdk/ui-utils';
+import { Markdown } from '~/components/chat/Markdown';
 
 interface ConsumerMessagesProps {
   id?: string;
@@ -27,7 +27,57 @@ interface ConsumerMessagesProps {
 }
 
 function stripMetadata(content: string) {
-  return content.replace(MODEL_REGEX, '').replace(PROVIDER_REGEX, '').trim();
+  const artifactRegex = /<boltArtifact\s+[^>]*>[\s\S]*?<\/boltArtifact>/gm;
+  return content.replace(MODEL_REGEX, '').replace(PROVIDER_REGEX, '').replace(artifactRegex, '').trim();
+}
+
+function extractUserText(content: Message['content']): string {
+  if (typeof content === 'string') {
+    return stripMetadata(content);
+  }
+
+  if (!Array.isArray(content)) {
+    return '';
+  }
+
+  return content
+    .filter((part: any) => part?.type === 'text' && typeof part.text === 'string')
+    .map((part: any) => stripMetadata(part.text))
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function ConsumerUserBubble({
+  content,
+  parts,
+}: {
+  content: Message['content'];
+  parts?: (TextUIPart | ReasoningUIPart | ToolInvocationUIPart | SourceUIPart | FileUIPart | StepStartUIPart)[];
+}) {
+  const text = extractUserText(content);
+  const images =
+    parts?.filter(
+      (part): part is FileUIPart => part.type === 'file' && 'mimeType' in part && part.mimeType.startsWith('image/'),
+    ) || [];
+
+  return (
+    <div className="ml-auto max-w-[92%] rounded-2xl rounded-br-md bg-accent-500/12 px-3.5 py-2.5 text-sm text-bolt-elements-textPrimary">
+      {images.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-2">
+          {images.map((item, index) => (
+            <img
+              key={index}
+              src={`data:${item.mimeType};base64,${item.data}`}
+              alt={`Attachment ${index + 1}`}
+              className="max-h-40 rounded-lg object-cover"
+            />
+          ))}
+        </div>
+      )}
+      {text ? <Markdown html>{text}</Markdown> : null}
+    </div>
+  );
 }
 
 function ConsumerAssistantMessage({
@@ -44,10 +94,9 @@ function ConsumerAssistantMessage({
   setChatMode?: (mode: 'discuss' | 'build') => void;
   model?: string;
   provider?: ProviderInfo;
-  parts?: (TextUIPart | ReasoningUIPart | ToolInvocationUIPart | SourceUIPart | FileUIPart | StepStartUIPart)[];
 }) {
   return (
-    <div className="overflow-hidden w-full">
+    <div className="mr-auto max-w-[95%] text-sm text-bolt-elements-textPrimary">
       <ConsumerMarkdown
         append={append}
         chatMode={chatMode}
@@ -81,31 +130,30 @@ export const ConsumerMessages = forwardRef<HTMLDivElement, ConsumerMessagesProps
               return (
                 <div
                   key={index}
-                  className={classNames('flex gap-4 py-3 w-full rounded-lg', {
+                  className={classNames('flex w-full', {
                     'mt-3': index > 0,
+                    'justify-end': isUserMessage,
+                    'justify-start': !isUserMessage,
                   })}
                 >
-                  <div className="grid grid-col-1 w-full">
-                    {isUserMessage ? (
-                      <UserMessage content={content} parts={parts} />
-                    ) : (
-                      <ConsumerAssistantMessage
-                        content={typeof content === 'string' ? content : ''}
-                        append={props.append}
-                        chatMode={props.chatMode}
-                        setChatMode={props.setChatMode}
-                        model={props.model}
-                        provider={props.provider}
-                        parts={parts}
-                      />
-                    )}
-                  </div>
+                  {isUserMessage ? (
+                    <ConsumerUserBubble content={content} parts={parts} />
+                  ) : (
+                    <ConsumerAssistantMessage
+                      content={typeof content === 'string' ? content : ''}
+                      append={props.append}
+                      chatMode={props.chatMode}
+                      setChatMode={props.setChatMode}
+                      model={props.model}
+                      provider={props.provider}
+                    />
+                  )}
                 </div>
               );
             })
           : null}
         {isStreaming && (
-          <div className="text-center w-full text-bolt-elements-item-contentAccent i-svg-spinners:3-dots-fade text-3xl mt-3" />
+          <div className="mt-3 text-bolt-elements-textTertiary i-svg-spinners:3-dots-fade text-2xl" />
         )}
       </div>
     );

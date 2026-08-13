@@ -3,45 +3,25 @@ import { DEFAULT_DEPLOYMENT_TARGET, type DeploymentTarget } from './types';
 
 const STORAGE_KEY = 'buildlive_deployment_target';
 
-function readStoredTarget(): DeploymentTarget {
-  if (typeof localStorage === 'undefined') {
-    return DEFAULT_DEPLOYMENT_TARGET;
-  }
-
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-
-    if (raw === 'webcontainer' || raw === 'docker') {
-      return raw;
-    }
-  } catch {
-    // ignore
-  }
-
-  return DEFAULT_DEPLOYMENT_TARGET;
-}
-
 /**
- * Active preview/execution backend preference.
- * Default is webcontainer.
+ * BuildLive always uses Docker. Legacy localStorage values are ignored/cleared.
  */
-export const deploymentTargetStore = atom<DeploymentTarget>(
-  typeof window === 'undefined' ? DEFAULT_DEPLOYMENT_TARGET : readStoredTarget(),
-);
+export const deploymentTargetStore = atom<DeploymentTarget>(DEFAULT_DEPLOYMENT_TARGET);
 
 /** Live health of the local runtime daemon + Docker. */
 export const dockerRuntimeAvailableStore = atom(false);
 
 export function getDeploymentTarget(): DeploymentTarget {
-  return deploymentTargetStore.get();
+  return 'docker';
 }
 
-export function setDeploymentTarget(target: DeploymentTarget) {
-  deploymentTargetStore.set(target);
+/** @deprecated Runtime is fixed to Docker — kept for call-site compatibility. */
+export function setDeploymentTarget(_target: DeploymentTarget) {
+  deploymentTargetStore.set('docker');
 
   if (typeof localStorage !== 'undefined') {
     try {
-      localStorage.setItem(STORAGE_KEY, target);
+      localStorage.setItem(STORAGE_KEY, 'docker');
     } catch {
       // ignore
     }
@@ -54,4 +34,19 @@ export function isDockerRuntimeAvailable(): boolean {
 
 export function setDockerRuntimeAvailable(available: boolean) {
   dockerRuntimeAvailableStore.set(available);
+}
+
+/** Clear any leftover WebContainer preference from older builds. */
+export function migrateDeploymentTargetToDocker() {
+  if (typeof localStorage === 'undefined') {
+    return;
+  }
+
+  try {
+    localStorage.setItem(STORAGE_KEY, 'docker');
+  } catch {
+    // ignore
+  }
+
+  deploymentTargetStore.set('docker');
 }

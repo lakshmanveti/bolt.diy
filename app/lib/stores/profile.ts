@@ -4,6 +4,12 @@ interface Profile {
   username: string;
   bio: string;
   avatar: string;
+  preferences?: {
+    notifications?: boolean;
+    theme?: 'light' | 'dark' | 'system';
+    language?: string;
+    timezone?: string;
+  };
 }
 
 // Initialize with stored profile or defaults

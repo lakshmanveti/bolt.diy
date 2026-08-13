@@ -12,7 +12,8 @@ export function useDeploymentTarget() {
   const deploymentTarget = useStore(deploymentTargetStore);
   const dockerAvailable = useStore(dockerRuntimeAvailableStore);
   const effectiveTarget = getEffectiveExecutionTarget();
-  const usingFallback = deploymentTarget === 'docker' && !dockerAvailable;
+  /** True when Docker daemon is offline (BuildLive has no WebContainer fallback). */
+  const usingFallback = !dockerAvailable;
 
   return {
     deploymentTarget,
