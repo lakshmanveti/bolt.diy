@@ -1,5 +1,6 @@
 import type { JSONValue, Message } from 'ai';
 import React, { type RefCallback, useCallback, useEffect, useRef, useState } from 'react';
+import { useStore } from '@nanostores/react';
 import { ClientOnly } from 'remix-utils/client-only';
 import { Menu } from '~/components/sidebar/Menu.client';
 import { classNames } from '~/utils/classNames';
@@ -10,9 +11,12 @@ import { openSidebar } from '~/lib/stores/sidebar';
 import { AuthButton } from '~/components/auth/AuthButton';
 import { ChatDescription } from '~/lib/persistence/ChatDescription.client';
 import { getApiKeysFromCookies } from '~/components/chat/APIKeyManager';
+import { fetchModelList, invalidateModelList } from '~/lib/modules/llm/fetch-models';
 import Cookies from 'js-cookie';
 import { ChatBox } from '~/components/chat/ChatBox';
 import { UserLlmPreferencesSetup } from '~/components/auth/UserLlmPreferencesSetup';
+import { isSupabaseConfigured } from '~/lib/supabase/client';
+import { userPreferencesStore } from '~/lib/supabase/user-preferences';
 import ChatAlert from '~/components/chat/ChatAlert';
 import { SupabaseChatAlert } from '~/components/chat/SupabaseAlert';
 import DeployChatAlert from '~/components/deploy/DeployAlert';
@@ -27,6 +31,8 @@ import { workbenchStore } from '~/lib/stores/workbench';
 import { ConsumerMessages } from './ConsumerMessages';
 import { AppPreview } from './AppPreview';
 import { HeadlessBoltTerminal } from './HeadlessBoltTerminal.client';
+import { AddBackendCard } from './AddBackendCard';
+import { useAddBackendPrompt } from './useAddBackendPrompt';
 
 const TEXTAREA_MIN_HEIGHT = 76;
 const TEXTAREA_MAX_HEIGHT = 160;
@@ -81,6 +87,7 @@ export interface ConsumerShellProps {
   userPreferencesReady?: boolean;
   onPreferencesSaved?: (prefs: import('~/lib/supabase/user-preferences').UserPreferences) => void;
   onApiKeysChange?: (providerName: string, apiKey: string) => void;
+  apiKeys?: Record<string, string>;
 }
 
 export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps>(
@@ -129,10 +136,15 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
       userPreferencesReady = true,
       onPreferencesSaved,
       onApiKeysChange,
+      apiKeys: apiKeysProp,
     },
     ref,
   ) => {
-    const [apiKeys, setApiKeys] = useState<Record<string, string>>(getApiKeysFromCookies());
+    const storedUserPreferences = useStore(userPreferencesStore);
+    const [localApiKeys, setLocalApiKeys] = useState<Record<string, string>>(() =>
+      isSupabaseConfigured() ? {} : getApiKeysFromCookies(),
+    );
+    const apiKeys = apiKeysProp ?? localApiKeys;
     const [modelList, setModelList] = useState<ModelInfo[]>([]);
     const [isModelSettingsCollapsed, setIsModelSettingsCollapsed] = useState(true);
     const [isListening, setIsListening] = useState(false);
@@ -143,6 +155,17 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
     const chatScrollRef = useRef<HTMLDivElement>(null);
     const stickToBottomRef = useRef(true);
     const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+    const addBackend = useAddBackendPrompt(Boolean(isStreaming));
+
+    const handleAddBackend = useCallback(() => {
+      if (!addBackend.connected) {
+        addBackend.openConnect();
+        return;
+      }
+
+      sendMessage?.({} as any, addBackend.followup);
+      addBackend.complete();
+    }, [addBackend, sendMessage]);
 
     const scrollChatToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
       const el = chatScrollRef.current;
@@ -211,37 +234,70 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
     }, []);
 
     useEffect(() => {
-      if (typeof window === 'undefined') {
+      if (apiKeysProp || !storedUserPreferences) {
+        return;
+      }
+
+      setLocalApiKeys(storedUserPreferences.apiKeys);
+    }, [apiKeysProp, storedUserPreferences]);
+
+    useEffect(() => {
+      if (apiKeysProp || isSupabaseConfigured() || typeof window === 'undefined') {
         return;
       }
 
       try {
-        setApiKeys(getApiKeysFromCookies());
+        setLocalApiKeys(getApiKeysFromCookies());
       } catch {
         Cookies.remove('apiKeys');
       }
+    }, [apiKeysProp]);
+
+    useEffect(() => {
+      if (!llmConfigReady || typeof window === 'undefined') {
+        return;
+      }
+
+      let cancelled = false;
 
       setIsModelLoading('all');
-      fetch('/api/models')
-        .then((response) => response.json())
-        .then((payload) => {
-          setModelList((payload as { modelList: ModelInfo[] }).modelList);
+      void fetchModelList()
+        .then((list) => {
+          if (!cancelled) {
+            setModelList(list);
+          }
         })
         .catch(() => undefined)
-        .finally(() => setIsModelLoading(undefined));
-    }, [providerList, provider]);
+        .finally(() => {
+          if (!cancelled) {
+            setIsModelLoading(undefined);
+          }
+        });
+
+      return () => {
+        cancelled = true;
+      };
+    }, [llmConfigReady]);
 
     const handleApiKeysChangeLocal = async (providerName: string, apiKey: string) => {
+      if (apiKeys[providerName] === apiKey) {
+        return;
+      }
+
       const newApiKeys = { ...apiKeys, [providerName]: apiKey };
-      setApiKeys(newApiKeys);
-      Cookies.set('apiKeys', JSON.stringify(newApiKeys));
+
+      if (!apiKeysProp) {
+        setLocalApiKeys(newApiKeys);
+        Cookies.set('apiKeys', JSON.stringify(newApiKeys));
+      }
+
       onApiKeysChange?.(providerName, apiKey);
       setIsModelLoading(providerName);
+      invalidateModelList(providerName);
 
       try {
-        const response = await fetch(`/api/models/${encodeURIComponent(providerName)}`);
-        const payload = (await response.json()) as { modelList: ModelInfo[] };
-        setModelList((prev) => [...prev.filter((m) => m.provider !== providerName), ...payload.modelList]);
+        const list = await fetchModelList(providerName);
+        setModelList((prev) => [...prev.filter((m) => m.provider !== providerName), ...list]);
       } catch {
         // ignore
       } finally {
@@ -360,7 +416,7 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
       }
 
       scrollChatToBottom(isStreaming ? 'auto' : 'smooth');
-    }, [messages, isStreaming, progressAnnotations, activeSession, scrollChatToBottom]);
+    }, [messages, isStreaming, progressAnnotations, activeSession, addBackend.visible, scrollChatToBottom]);
 
     const composer = (
       <div className="flex flex-col gap-2 w-full">
@@ -573,6 +629,13 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
                         />
                       )}
                     </ClientOnly>
+                    {addBackend.visible ? (
+                      <AddBackendCard
+                        connected={addBackend.connected}
+                        onPrimary={handleAddBackend}
+                        onDismiss={addBackend.dismiss}
+                      />
+                    ) : null}
                   </div>
 
                   {showJumpToLatest && (

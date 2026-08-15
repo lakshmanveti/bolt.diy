@@ -14,6 +14,20 @@ body {
   background-color: var(--bolt-elements-bg-depth-1);
 }
 
+/*
+ * Tailwind-compat reset still uses appearance: button. On Windows Chrome that
+ * keeps native light chrome behind text-only <button>s (Not now, Dismiss, Cancel).
+ */
+button,
+[type='button'],
+[type='reset'],
+[type='submit'] {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: transparent;
+  background-image: none;
+}
+
 :root {
   --gradient-opacity: 0.8;
   --primary-color: rgba(158, 117, 240, var(--gradient-opacity));

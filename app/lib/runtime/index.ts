@@ -18,6 +18,7 @@ export {
 export {
   DOCKER_RUNTIME_NOT_CONFIGURED,
   DockerRuntime,
+  dockerPreviewBusy,
   dockerPreviewReloadToken,
   verifyPreviewReachable,
 } from './docker-runtime';

@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { Button } from '~/components/ui/Button';
 import { classNames } from '~/utils/classNames';
 import { useGitHubConnection } from '~/lib/hooks';
+import { updateGitHubConnection } from '~/lib/stores/github';
 
 interface ConnectionTestResult {
   status: 'success' | 'error' | 'testing';
@@ -16,10 +17,32 @@ interface GitHubConnectionProps {
 }
 
 export function GitHubConnection({ connectionTest, onTestConnection }: GitHubConnectionProps) {
-  const { isConnected, isLoading, isConnecting, connect, disconnect, error } = useGitHubConnection();
+  const { isConnected, isLoading, isConnecting, connect, disconnect, error, connection } = useGitHubConnection();
 
-  const [token, setToken] = React.useState('');
-  const [tokenType, setTokenType] = React.useState<'classic' | 'fine-grained'>('classic');
+  const [token, setToken] = React.useState(connection?.token || '');
+  const [tokenType, setTokenType] = React.useState<'classic' | 'fine-grained'>(connection?.tokenType || 'classic');
+
+  React.useEffect(() => {
+    if (isConnected) {
+      return;
+    }
+
+    if (connection?.token) {
+      setToken(connection.token);
+    }
+
+    if (connection?.tokenType) {
+      setTokenType(connection.tokenType);
+    }
+  }, [connection?.token, connection?.tokenType, isConnected]);
+
+  const saveDraft = (nextToken: string, nextTokenType: 'classic' | 'fine-grained') => {
+    updateGitHubConnection({
+      token: nextToken,
+      tokenType: nextTokenType,
+      user: connection?.user ?? null,
+    });
+  };
 
   const handleConnect = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -61,25 +84,6 @@ export function GitHubConnection({ connectionTest, onTestConnection }: GitHubCon
       transition={{ delay: 0.2 }}
     >
       <div className="p-6 space-y-6">
-        {!isConnected && (
-          <div className="text-xs text-bolt-elements-textSecondary bg-bolt-elements-background-depth-1 dark:bg-bolt-elements-background-depth-1 p-3 rounded-lg mb-4">
-            <p className="flex items-center gap-1 mb-1">
-              <span className="i-ph:lightbulb w-3.5 h-3.5 text-bolt-elements-icon-success dark:text-bolt-elements-icon-success" />
-              <span className="font-medium">Tip:</span> You can also set the{' '}
-              <code className="px-1 py-0.5 bg-bolt-elements-background-depth-2 dark:bg-bolt-elements-background-depth-2 rounded">
-                VITE_GITHUB_ACCESS_TOKEN
-              </code>{' '}
-              environment variable to connect automatically.
-            </p>
-            <p>
-              For fine-grained tokens, also set{' '}
-              <code className="px-1 py-0.5 bg-bolt-elements-background-depth-2 dark:bg-bolt-elements-background-depth-2 rounded">
-                VITE_GITHUB_TOKEN_TYPE=fine-grained
-              </code>
-            </p>
-          </div>
-        )}
-
         <form onSubmit={handleConnect} className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
@@ -88,7 +92,11 @@ export function GitHubConnection({ connectionTest, onTestConnection }: GitHubCon
               </label>
               <select
                 value={tokenType}
-                onChange={(e) => setTokenType(e.target.value as 'classic' | 'fine-grained')}
+                onChange={(e) => {
+                  const nextType = e.target.value as 'classic' | 'fine-grained';
+                  setTokenType(nextType);
+                  saveDraft(token, nextType);
+                }}
                 disabled={isConnecting || isConnected}
                 className={classNames(
                   'w-full px-3 py-2 rounded-lg text-sm',
@@ -111,7 +119,11 @@ export function GitHubConnection({ connectionTest, onTestConnection }: GitHubCon
               <input
                 type="password"
                 value={token}
-                onChange={(e) => setToken(e.target.value)}
+                onChange={(e) => {
+                  const nextToken = e.target.value;
+                  setToken(nextToken);
+                  saveDraft(nextToken, tokenType);
+                }}
                 disabled={isConnecting || isConnected}
                 placeholder={`Enter your GitHub ${
                   tokenType === 'classic' ? 'personal access token' : 'fine-grained token'

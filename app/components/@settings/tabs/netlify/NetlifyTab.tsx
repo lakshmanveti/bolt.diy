@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { toast } from 'react-toastify';
 import { classNames } from '~/utils/classNames';
 import { useStore } from '@nanostores/react';
-import { netlifyConnection, updateNetlifyConnection, initializeNetlifyConnection } from '~/lib/stores/netlify';
+import { netlifyConnection, updateNetlifyConnection } from '~/lib/stores/netlify';
 import type { NetlifySite, NetlifyDeploy, NetlifyBuild, NetlifyUser } from '~/types/netlify';
 import { Button } from '~/components/ui/Button';
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '~/components/ui/Collapsible';
@@ -36,7 +36,7 @@ const NetlifyLogo = () => (
 
 export default function NetlifyTab() {
   const connection = useStore(netlifyConnection);
-  const [tokenInput, setTokenInput] = useState('');
+  const [tokenInput, setTokenInput] = useState(connection.token || '');
   const [fetchingStats, setFetchingStats] = useState(false);
   const [sites, setSites] = useState<NetlifySite[]>([]);
   const [deploys, setDeploys] = useState<NetlifyDeploy[]>([]);
@@ -428,9 +428,10 @@ export default function NetlifyTab() {
   };
 
   useEffect(() => {
-    // Initialize connection with environment token if available
-    initializeNetlifyConnection();
-  }, []);
+    if (!connection.user && connection.token && tokenInput !== connection.token) {
+      setTokenInput(connection.token);
+    }
+  }, [connection.token, connection.user]);
 
   useEffect(() => {
     // Check if we have a connection with a token but no stats
@@ -1296,17 +1297,6 @@ export default function NetlifyTab() {
         <div className="p-6">
           {!connection.user ? (
             <div className="space-y-4">
-              <div className="text-xs text-bolt-elements-textSecondary bg-bolt-elements-background-depth-1 dark:bg-bolt-elements-background-depth-1 p-3 rounded-lg mb-4">
-                <p className="flex items-center gap-1 mb-1">
-                  <span className="i-ph:lightbulb w-3.5 h-3.5 text-bolt-elements-icon-success dark:text-bolt-elements-icon-success" />
-                  <span className="font-medium">Tip:</span> You can also set the{' '}
-                  <code className="px-1 py-0.5 bg-bolt-elements-background-depth-2 dark:bg-bolt-elements-background-depth-2 rounded">
-                    VITE_NETLIFY_ACCESS_TOKEN
-                  </code>{' '}
-                  environment variable to connect automatically.
-                </p>
-              </div>
-
               <div>
                 <label className="block text-sm text-bolt-elements-textSecondary dark:text-bolt-elements-textSecondary mb-2">
                   API Token
@@ -1314,7 +1304,11 @@ export default function NetlifyTab() {
                 <input
                   type="password"
                   value={tokenInput}
-                  onChange={(e) => setTokenInput(e.target.value)}
+                  onChange={(e) => {
+                    const nextToken = e.target.value;
+                    setTokenInput(nextToken);
+                    updateNetlifyConnection({ token: nextToken, user: connection.user });
+                  }}
                   placeholder="Enter your Netlify API token"
                   className={classNames(
                     'w-full px-3 py-2 rounded-lg text-sm',

@@ -13,7 +13,6 @@ import {
   updateSupabaseConnection,
   fetchSupabaseStats,
   fetchProjectApiKeys,
-  initializeSupabaseConnection,
   type SupabaseProject,
 } from '~/lib/stores/supabase';
 
@@ -56,7 +55,7 @@ export default function SupabaseTab() {
   const fetchingStats = useStore(isFetchingStats);
   const fetchingApiKeys = useStore(isFetchingApiKeys);
 
-  const [tokenInput, setTokenInput] = useState('');
+  const [tokenInput, setTokenInput] = useState(connection.token || '');
   const [isProjectsExpanded, setIsProjectsExpanded] = useState(false);
   const [connectionTest, setConnectionTest] = useState<ConnectionTestResult | null>(null);
   const [isProjectActionLoading, setIsProjectActionLoading] = useState(false);
@@ -188,25 +187,11 @@ export default function SupabaseTab() {
     },
   ];
 
-  // Initialize connection on component mount - check server-side token first
   useEffect(() => {
-    const initializeConnection = async () => {
-      try {
-        // First try to initialize using server-side token
-        await initializeSupabaseConnection();
-
-        // If no connection was established, the user will need to manually enter a token
-        const currentState = supabaseConnection.get();
-
-        if (!currentState.user) {
-          console.log('No server-side Supabase token available, manual connection required');
-        }
-      } catch (error) {
-        console.error('Failed to initialize Supabase connection:', error);
-      }
-    };
-    initializeConnection();
-  }, []);
+    if (!connection.user && connection.token && tokenInput !== connection.token) {
+      setTokenInput(connection.token);
+    }
+  }, [connection.token, connection.user]);
 
   useEffect(() => {
     const fetchProjects = async () => {
@@ -700,23 +685,16 @@ export default function SupabaseTab() {
         <div className="p-6 space-y-6">
           {!connection.user ? (
             <div className="space-y-4">
-              <div className="text-xs text-bolt-elements-textSecondary bg-bolt-elements-background-depth-1 dark:bg-bolt-elements-background-depth-1 p-3 rounded-lg mb-4">
-                <p className="flex items-center gap-1 mb-1">
-                  <span className="i-ph:lightbulb w-3.5 h-3.5 text-bolt-elements-icon-success dark:text-bolt-elements-icon-success" />
-                  <span className="font-medium">Tip:</span> You can also set the{' '}
-                  <code className="px-1 py-0.5 bg-bolt-elements-background-depth-2 dark:bg-bolt-elements-background-depth-2 rounded">
-                    VITE_SUPABASE_ACCESS_TOKEN
-                  </code>{' '}
-                  environment variable to connect automatically.
-                </p>
-              </div>
-
               <div>
                 <label className="block text-sm text-bolt-elements-textSecondary mb-2">Access Token</label>
                 <input
                   type="password"
                   value={tokenInput}
-                  onChange={(e) => setTokenInput(e.target.value)}
+                  onChange={(e) => {
+                    const nextToken = e.target.value;
+                    setTokenInput(nextToken);
+                    updateSupabaseConnection({ token: nextToken });
+                  }}
                   disabled={connecting}
                   placeholder="Enter your Supabase access token"
                   className={classNames(

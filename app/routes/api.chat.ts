@@ -14,6 +14,10 @@ import { extractPropertiesFromMessage } from '~/lib/.server/llm/utils';
 import type { DesignScheme } from '~/types/design-scheme';
 import { MCPService } from '~/lib/services/mcpService';
 import { StreamRecoveryManager } from '~/lib/.server/llm/stream-recovery';
+import { isBillingEnabled } from '~/lib/billing/plans';
+import { createSupabaseForRequest, getRequestUser } from '~/lib/billing/server';
+import { hostedTokensExceeded, isSubscriptionRecordActive } from '~/lib/billing/status';
+import { LLMManager } from '~/lib/modules/llm/manager';
 
 export async function action(args: ActionFunctionArgs) {
   return chatAction(args);
@@ -68,10 +72,69 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
     }>();
 
   const cookieHeader = request.headers.get('Cookie');
-  const apiKeys = JSON.parse(parseCookies(cookieHeader || '').apiKeys || '{}');
+  const apiKeys = JSON.parse(parseCookies(cookieHeader || '').apiKeys || '{}') as Record<string, string>;
   const providerSettings: Record<string, IProviderSetting> = JSON.parse(
     parseCookies(cookieHeader || '').providers || '{}',
   );
+  const selectedProvider = parseCookies(cookieHeader || '').selectedProvider || '';
+  const serverEnv = context.cloudflare?.env as Record<string, string | undefined> | undefined;
+
+  if (isBillingEnabled()) {
+    const user = await getRequestUser(request, serverEnv);
+
+    if (!user) {
+      return new Response(JSON.stringify({ error: true, message: 'Sign in required', statusCode: 401 }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const supabase = createSupabaseForRequest(request, serverEnv);
+    const { data: subscription } = await supabase
+      .from('user_subscription')
+      .select('*')
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    if (!isSubscriptionRecordActive(subscription)) {
+      return new Response(
+        JSON.stringify({ error: true, message: 'Subscribe to continue building', statusCode: 402 }),
+        {
+          status: 402,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
+    }
+
+    if (hostedTokensExceeded(subscription)) {
+      return new Response(
+        JSON.stringify({
+          error: true,
+          message: 'Hosted token cap reached. Upgrade or switch to your own API key.',
+          statusCode: 402,
+        }),
+        {
+          status: 402,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
+    }
+
+    if (subscription?.plan === 'hosted') {
+      const providerName = selectedProvider || 'Anthropic';
+      const provider = LLMManager.getInstance(serverEnv as any).getProvider(providerName);
+      const tokenKey = provider?.config.apiTokenKey;
+
+      if (tokenKey) {
+        const hostedKey =
+          (serverEnv as Record<string, string | undefined> | undefined)?.[tokenKey] || process.env[tokenKey];
+
+        if (typeof hostedKey === 'string' && hostedKey.trim()) {
+          apiKeys[providerName] = hostedKey.trim();
+        }
+      }
+    }
+  }
 
   const stream = new SwitchableStream();
 

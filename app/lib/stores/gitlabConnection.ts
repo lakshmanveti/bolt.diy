@@ -16,6 +16,24 @@ const gitlabConnectionAtom = atom<GitLabConnection>({
 
 const gitlabUrlAtom = atom('https://gitlab.com');
 
+export { gitlabConnectionAtom };
+
+export function replaceGitLabConnection(connection: GitLabConnection) {
+  gitlabConnectionAtom.set(connection);
+
+  if (connection.gitlabUrl) {
+    gitlabUrlAtom.set(connection.gitlabUrl);
+  }
+
+  if (typeof window !== 'undefined') {
+    if (connection.user || connection.token) {
+      localStorage.setItem('gitlab_connection', JSON.stringify(connection));
+    } else {
+      localStorage.removeItem('gitlab_connection');
+    }
+  }
+}
+
 // Initialize connection from localStorage on startup
 function initializeConnection() {
   try {
@@ -96,6 +114,10 @@ class GitLabConnectionStore {
       logStore.logInfo('Connected to GitLab', {
         type: 'system',
         message: `Connected to GitLab as ${user.username}`,
+      });
+
+      void import('~/lib/supabase/user-integrations').then(({ schedulePersistIntegrations }) => {
+        schedulePersistIntegrations();
       });
 
       return { success: true };
@@ -183,6 +205,10 @@ class GitLabConnectionStore {
       type: 'system',
       message: 'Disconnected from GitLab',
     });
+
+    void import('~/lib/supabase/user-integrations').then(({ schedulePersistIntegrations }) => {
+      schedulePersistIntegrations();
+    });
   }
 
   loadSavedConnection() {
@@ -213,12 +239,22 @@ class GitLabConnectionStore {
 
   setGitLabUrl(url: string) {
     gitlabUrlAtom.set(url);
+    gitlabConnectionAtom.set({
+      ...gitlabConnectionAtom.get(),
+      gitlabUrl: url,
+    });
+    void import('~/lib/supabase/user-integrations').then(({ schedulePersistIntegrations }) => {
+      schedulePersistIntegrations();
+    });
   }
 
   setToken(token: string) {
     gitlabConnectionAtom.set({
       ...gitlabConnectionAtom.get(),
       token,
+    });
+    void import('~/lib/supabase/user-integrations').then(({ schedulePersistIntegrations }) => {
+      schedulePersistIntegrations();
     });
   }
 

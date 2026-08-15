@@ -1,15 +1,20 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
 import { ClientOnly } from 'remix-utils/client-only';
 import { APIKeyManager } from '~/components/chat/APIKeyManager';
 import { ModelSelector } from '~/components/chat/ModelSelector';
 import { getEnvDefaultLlmModel, getEnvDefaultLlmProvider } from '~/lib/modules/llm/defaults';
+import { fetchModelList, invalidateModelList } from '~/lib/modules/llm/fetch-models';
 import { LOCAL_PROVIDERS } from '~/lib/stores/settings';
 import type { ModelInfo } from '~/lib/modules/llm/types';
 import {
+  extractLlmApiKeysFromDocument,
   saveUserPreferences,
   syncPreferencesToCookies,
+  userPreferenceDocumentStore,
+  userPreferencesReadyStore,
+  userPreferencesStore,
   type UserPreferences,
 } from '~/lib/supabase/user-preferences';
 import { PROVIDER_LIST } from '~/utils/constants';
@@ -21,16 +26,24 @@ import { providersStore } from '~/lib/stores/settings';
 type UserLlmPreferencesSetupProps = {
   providerList: ProviderInfo[];
   onSaved: (prefs: UserPreferences) => void;
+  variant?: 'setup' | 'settings';
 };
 
-export function UserLlmPreferencesSetup({ providerList, onSaved }: UserLlmPreferencesSetupProps) {
+export function UserLlmPreferencesSetup({
+  providerList,
+  onSaved,
+  variant = 'setup',
+}: UserLlmPreferencesSetupProps) {
   const envDefaultProvider = getEnvDefaultLlmProvider();
   const envDefaultModel = getEnvDefaultLlmModel();
 
-  const setupProviderList =
-    providerList.length > 0
-      ? providerList
-      : (PROVIDER_LIST.filter((p) => !LOCAL_PROVIDERS.includes(p.name)) as ProviderInfo[]);
+  const setupProviderList = useMemo(
+    () =>
+      providerList.length > 0
+        ? providerList
+        : (PROVIDER_LIST.filter((p) => !LOCAL_PROVIDERS.includes(p.name)) as ProviderInfo[]),
+    [providerList],
+  );
 
   const initialProvider =
     setupProviderList.find((p) => p.name === envDefaultProvider) ?? setupProviderList[0];
@@ -41,45 +54,78 @@ export function UserLlmPreferencesSetup({ providerList, onSaved }: UserLlmPrefer
   const [modelList, setModelList] = useState<ModelInfo[]>([]);
   const [isModelLoading, setIsModelLoading] = useState<string | undefined>('all');
   const [busy, setBusy] = useState(false);
-  const [envKeySet, setEnvKeySet] = useState(false);
+  const userPreferencesReady = useStore(userPreferencesReadyStore);
+  const storedPrefs = useStore(userPreferencesStore);
+
+  useEffect(() => {
+    if (!userPreferencesReady) {
+      return;
+    }
+
+    if (storedPrefs?.apiKeys && Object.keys(storedPrefs.apiKeys).length > 0) {
+      setApiKeys(storedPrefs.apiKeys);
+    }
+
+    if (storedPrefs?.provider) {
+      const matched = setupProviderList.find((p) => p.name === storedPrefs.provider);
+
+      if (matched) {
+        setProvider((current) => (current?.name === matched.name ? current : matched));
+      }
+    }
+
+    if (storedPrefs?.model) {
+      setModel((current) => (current === storedPrefs.model ? current : storedPrefs.model));
+    }
+  }, [userPreferencesReady, storedPrefs?.provider, storedPrefs?.model, storedPrefs?.apiKeys, setupProviderList]);
+
+  useEffect(() => {
+    if (!provider?.name) {
+      return;
+    }
+
+    let cancelled = false;
+    const providerName = provider.name;
+
+    setIsModelLoading(providerName);
+    void fetchModelList(providerName)
+      .then((list) => {
+        if (cancelled) {
+          return;
+        }
+
+        setModelList((prev) => [...prev.filter((m) => m.provider !== providerName), ...list]);
+        setModel((current) => {
+          if (current.trim()) {
+            return current;
+          }
+
+          if (list.length === 0) {
+            return current;
+          }
+
+          return list.find((m) => m.name === envDefaultModel)?.name ?? list[0].name;
+        });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) {
+          setIsModelLoading(undefined);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [provider?.name, envDefaultModel]);
 
   const providerSettings = useStore(providersStore);
 
-  useEffect(() => {
-    if (!provider?.name) {
-      return;
-    }
-
-    setIsModelLoading(provider.name);
-    fetch(`/api/models/${encodeURIComponent(provider.name)}`)
-      .then((r) => r.json())
-      .then((payload) => {
-        const list = (payload as { modelList: ModelInfo[] }).modelList ?? [];
-        setModelList((prev) => [...prev.filter((m) => m.provider !== provider.name), ...list]);
-
-        if (!model && list.length > 0) {
-          const preferred = list.find((m) => m.name === envDefaultModel)?.name ?? list[0].name;
-          setModel(preferred);
-        }
-      })
-      .catch(() => undefined)
-      .finally(() => setIsModelLoading(undefined));
-  }, [provider?.name, envDefaultModel, model]);
-
-  useEffect(() => {
-    if (!provider?.name) {
-      return;
-    }
-
-    fetch(`/api/check-env-key?provider=${encodeURIComponent(provider.name)}`)
-      .then((r) => r.json())
-      .then((data) => setEnvKeySet(Boolean((data as { isSet?: boolean }).isSet)))
-      .catch(() => setEnvKeySet(false));
-  }, [provider?.name]);
+  const requiresApiKey = provider?.name ? !LOCAL_PROVIDERS.includes(provider.name) : true;
 
   const canSave =
     Boolean(provider?.name && model.trim()) &&
-    (Boolean(apiKeys[provider?.name ?? '']?.trim()) || envKeySet);
+    (!requiresApiKey || Boolean(apiKeys[provider?.name ?? '']?.trim()));
 
   const handleSave = async () => {
     if (!provider?.name || !model.trim()) {
@@ -87,8 +133,8 @@ export function UserLlmPreferencesSetup({ providerList, onSaved }: UserLlmPrefer
       return;
     }
 
-    if (!apiKeys[provider.name]?.trim() && !envKeySet) {
-      toast.error('Add an API key for the selected provider (or set it in your server environment)');
+    if (requiresApiKey && !apiKeys[provider.name]?.trim()) {
+      toast.error('Add an API key for the selected provider');
       return;
     }
 
@@ -106,16 +152,25 @@ export function UserLlmPreferencesSetup({ providerList, onSaved }: UserLlmPrefer
         enabled: true,
       };
 
+      const mergedApiKeys = {
+        ...extractLlmApiKeysFromDocument(userPreferenceDocumentStore.get()),
+        ...apiKeys,
+      };
+
       const prefs: UserPreferences = {
         provider: provider.name,
         model: model.trim(),
-        apiKeys,
+        apiKeys: Object.fromEntries(
+          Object.entries(mergedApiKeys).filter(([, value]) => Boolean(value?.trim())),
+        ),
         providerSettings: providerSettingsPayload,
       };
 
       const saved = await saveUserPreferences(prefs);
       syncPreferencesToCookies(saved);
-      toast.success('Model preferences saved');
+      invalidateModelList(saved.provider);
+      invalidateModelList();
+      toast.success(variant === 'settings' ? 'Model settings saved' : 'Model preferences saved');
       onSaved(saved);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to save preferences');
@@ -134,15 +189,23 @@ export function UserLlmPreferencesSetup({ providerList, onSaved }: UserLlmPrefer
   }
 
   return (
-    <div className="rounded-lg border border-accent-500/30 bg-bolt-elements-background-depth-2 p-4">
-      <h3 className="text-sm font-medium text-bolt-elements-textPrimary">Set up your AI model</h3>
-      <p className="mt-1 text-xs text-bolt-elements-textSecondary">
-        Choose a provider, model, and API key before you start building. Preferences are saved to your account.
-      </p>
+    <div
+      className={classNames(
+        variant === 'settings' ? 'space-y-3' : 'rounded-lg border border-accent-500/30 bg-bolt-elements-background-depth-2 p-4',
+      )}
+    >
+      {variant === 'setup' && (
+        <>
+          <h3 className="text-sm font-medium text-bolt-elements-textPrimary">Set up your AI model</h3>
+          <p className="mt-1 text-xs text-bolt-elements-textSecondary">
+            Choose a provider, model, and API key. Your key is stored in your account and used until you change it.
+          </p>
+        </>
+      )}
 
       <ClientOnly fallback={<div className="mt-4 h-24 animate-pulse rounded-md bg-bolt-elements-background-depth-3" />}>
         {() => (
-          <div className="mt-4 space-y-3">
+          <div className={variant === 'setup' ? 'mt-4 space-y-3' : 'space-y-3'}>
             <ModelSelector
               model={model}
               setModel={setModel}
@@ -153,7 +216,7 @@ export function UserLlmPreferencesSetup({ providerList, onSaved }: UserLlmPrefer
               apiKeys={apiKeys}
               modelLoading={isModelLoading}
             />
-            {!LOCAL_PROVIDERS.includes(provider.name) && (
+            {requiresApiKey && (
               <APIKeyManager
                 variant="setup"
                 provider={provider}
@@ -174,11 +237,7 @@ export function UserLlmPreferencesSetup({ providerList, onSaved }: UserLlmPrefer
           'bg-accent-500 text-white hover:bg-accent-600 disabled:opacity-50',
         )}
       >
-        {busy
-          ? 'Saving…'
-          : envKeySet && !apiKeys[provider.name]?.trim()
-            ? 'Save and continue (use server API key)'
-            : 'Save and continue'}
+        {busy ? 'Saving…' : variant === 'settings' ? 'Save changes' : 'Save and continue'}
       </button>
     </div>
   );

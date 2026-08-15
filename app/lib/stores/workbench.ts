@@ -131,6 +131,17 @@ export class WorkbenchStore {
     this.actionAlert.set(undefined);
   }
 
+  /**
+   * After a chat turn (including terminal-error fixes), restart/remount the
+   * Docker preview once file/shell/start actions in the queue have finished.
+   */
+  schedulePreviewFlush() {
+    this.addToExecutionQueue(async () => {
+      const { getDockerRuntime } = await import('~/lib/runtime');
+      await getDockerRuntime().flushPreview();
+    });
+  }
+
   get SupabaseAlert() {
     return this.supabaseAlert;
   }

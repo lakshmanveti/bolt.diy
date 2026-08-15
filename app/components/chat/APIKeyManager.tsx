@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { IconButton } from '~/components/ui/IconButton';
 import type { ProviderInfo } from '~/types/model';
 import Cookies from 'js-cookie';
@@ -12,9 +12,6 @@ interface APIKeyManagerProps {
   /** Setup flow: always show an input so users can save a key to their account. */
   variant?: 'default' | 'setup';
 }
-
-// cache which stores whether the provider's API key is set via environment variable
-const providerEnvKeyStatusCache: Record<string, boolean> = {};
 
 const apiKeyMemoizeCache: { [k: string]: Record<string, string> } = {};
 
@@ -38,48 +35,14 @@ export const APIKeyManager: React.FC<APIKeyManagerProps> = ({ provider, apiKey, 
   const isSetup = variant === 'setup';
   const [isEditing, setIsEditing] = useState(isSetup);
   const [tempKey, setTempKey] = useState(apiKey);
-  const [isEnvKeySet, setIsEnvKeySet] = useState(false);
 
-  // Reset states and load saved key when provider changes
   useEffect(() => {
+    setTempKey(apiKey);
+
     if (isSetup) {
-      setTempKey(apiKey);
       setIsEditing(true);
-      return;
     }
-
-    const savedKeys = getApiKeysFromCookies();
-    const savedKey = savedKeys[provider.name] || '';
-
-    setTempKey(savedKey);
-    setApiKey(savedKey);
-    setIsEditing(false);
-  }, [provider.name, isSetup]);
-
-  const checkEnvApiKey = useCallback(async () => {
-    // Check cache first
-    if (providerEnvKeyStatusCache[provider.name] !== undefined) {
-      setIsEnvKeySet(providerEnvKeyStatusCache[provider.name]);
-      return;
-    }
-
-    try {
-      const response = await fetch(`/api/check-env-key?provider=${encodeURIComponent(provider.name)}`);
-      const data = await response.json();
-      const isSet = (data as { isSet: boolean }).isSet;
-
-      // Cache the result
-      providerEnvKeyStatusCache[provider.name] = isSet;
-      setIsEnvKeySet(isSet);
-    } catch (error) {
-      console.error('Failed to check environment API key:', error);
-      setIsEnvKeySet(false);
-    }
-  }, [provider.name]);
-
-  useEffect(() => {
-    checkEnvApiKey();
-  }, [checkEnvApiKey]);
+  }, [provider.name, isSetup, apiKey]);
 
   const handleSave = () => {
     setApiKey(tempKey);
@@ -104,12 +67,9 @@ export const APIKeyManager: React.FC<APIKeyManagerProps> = ({ provider, apiKey, 
         <label className="text-sm font-medium text-bolt-elements-textSecondary">
           {provider.name} API key
         </label>
-        {isEnvKeySet && (
-          <p className="text-xs text-bolt-elements-textTertiary">
-            A server environment key is configured. Enter your own key below to store it on your account, or leave
-            blank and use &quot;Save and continue&quot; to rely on the server key.
-          </p>
-        )}
+        <p className="text-xs text-bolt-elements-textTertiary">
+          Required. Your key is saved to your account and used until you change it.
+        </p>
         <input
           type="password"
           value={tempKey}
@@ -141,17 +101,12 @@ export const APIKeyManager: React.FC<APIKeyManagerProps> = ({ provider, apiKey, 
               {apiKey ? (
                 <>
                   <div className="i-ph:check-circle-fill text-green-500 w-4 h-4" />
-                  <span className="text-xs text-green-500">Set via UI</span>
-                </>
-              ) : isEnvKeySet ? (
-                <>
-                  <div className="i-ph:check-circle-fill text-green-500 w-4 h-4" />
-                  <span className="text-xs text-green-500">Set via environment variable</span>
+                  <span className="text-xs text-green-500">Saved to your account</span>
                 </>
               ) : (
                 <>
                   <div className="i-ph:x-circle-fill text-red-500 w-4 h-4" />
-                  <span className="text-xs text-red-500">Not Set (Please set via UI or ENV_VAR)</span>
+                  <span className="text-xs text-red-500">Not set — add your API key</span>
                 </>
               )}
             </div>
@@ -193,15 +148,12 @@ export const APIKeyManager: React.FC<APIKeyManagerProps> = ({ provider, apiKey, 
                 setTempKey(apiKey);
                 setIsEditing(true);
               }}
-              title={isEnvKeySet ? 'Enter your own API key' : 'Edit API Key'}
+              title="Edit API Key"
               className="bg-blue-500/10 hover:bg-blue-500/20 text-blue-500"
             >
               <div className="i-ph:pencil-simple w-4 h-4" />
             </IconButton>
-            {isEnvKeySet && !apiKey && (
-              <span className="text-xs text-bolt-elements-textTertiary">or edit to use your own key</span>
-            )}
-            {provider?.getApiKeyLink && !apiKey && !isEnvKeySet && (
+            {provider?.getApiKeyLink && !apiKey && (
               <IconButton
                 onClick={() => window.open(provider?.getApiKeyLink)}
                 title="Get API Key"

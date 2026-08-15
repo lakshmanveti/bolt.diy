@@ -99,6 +99,10 @@ export async function initSupabaseAuth(): Promise<void> {
         } catch (error) {
           logger.warn('Failed to claim device chats', error);
         }
+
+        void import('~/lib/supabase/user-preferences').then(({ loadUserPreferenceDocument }) => {
+          void loadUserPreferenceDocument({ force: true });
+        });
       }
 
       if (event === 'SIGNED_OUT' || (event === 'TOKEN_REFRESHED' && !session)) {

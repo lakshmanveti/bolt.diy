@@ -1,16 +1,18 @@
 import { useStore } from '@nanostores/react';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes } from 'react';
 import { toast } from 'react-toastify';
 import type { ProgressAnnotation } from '~/types/context';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { dockerPreviewReloadToken } from '~/lib/runtime';
+import { dockerPreviewBusy, dockerPreviewReloadToken } from '~/lib/runtime';
 import { previewHealthStore } from '~/lib/stores/preview-health';
 import { retryPreviewRecovery } from '~/lib/stores/previews';
 import { classNames } from '~/utils/classNames';
 import { Inspector, type ElementInfo } from '~/components/workbench/Inspector';
 import { BuildProgress } from './BuildProgress';
 import { ConsumerDeployButton } from './ConsumerDeployButton';
+import { copyPreviewLink, LivePreviewBar, LivePreviewOverlay, useLivePreviewUi } from './LivePreviewBar';
 import { BuildLiveLogo } from '~/components/ui/BuildLiveLogo';
+import { Tooltip } from '~/components/ui/Tooltip';
 
 /**
  * Prefer direct Docker host ports over /embed proxies.
@@ -68,6 +70,21 @@ const iconBtn = (primary?: boolean, active?: boolean) =>
         : 'border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 text-bolt-elements-textPrimary hover:bg-bolt-elements-item-backgroundActive',
   );
 
+function ToolbarIconButton({
+  tooltip,
+  className,
+  children,
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement> & { tooltip: string }) {
+  return (
+    <Tooltip content={tooltip} delayDuration={200}>
+      <button type="button" aria-label={tooltip} className={className} {...props}>
+        {children}
+      </button>
+    </Tooltip>
+  );
+}
+
 function PreviewBrandBadge() {
   return (
     <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-lg border border-bolt-elements-borderColor/50 bg-bolt-elements-background-depth-1/80 px-2.5 py-1.5 shadow-sm backdrop-blur-sm">
@@ -108,21 +125,21 @@ function PreviewToolbar({
       </div>
 
       <div className="flex items-center gap-1.5 shrink-0">
-        <a href="/" className={iconBtn(true)} title="New App" aria-label="New App">
-          <div className="i-ph:plus w-4 h-4" />
-        </a>
+        <Tooltip content="New app" delayDuration={200}>
+          <a href="/" className={iconBtn(true)} aria-label="New app">
+            <div className="i-ph:plus w-4 h-4" />
+          </a>
+        </Tooltip>
 
         <ConsumerDeployButton />
 
-        <button
-          type="button"
+        <ToolbarIconButton
+          tooltip="Download code as ZIP"
           className={iconBtn()}
-          title="Download code (ZIP)"
-          aria-label="Download code"
           onClick={() => workbenchStore.downloadZip()}
         >
           <div className="i-ph:download-simple w-4 h-4" />
-        </button>
+        </ToolbarIconButton>
 
         {readyPreviews.length > 1 && (
           <select
@@ -140,53 +157,52 @@ function PreviewToolbar({
 
         {activeBaseUrl && (
           <>
-            <button
-              type="button"
+            <ToolbarIconButton
+              tooltip={mobileView ? 'Switch to desktop view' : 'Switch to mobile view'}
               className={iconBtn(false, mobileView)}
-              title={mobileView ? 'Desktop view' : 'Mobile view'}
-              aria-label={mobileView ? 'Desktop view' : 'Mobile view'}
               aria-pressed={mobileView}
               onClick={onToggleMobile}
             >
               <div className={mobileView ? 'i-ph:desktop w-4 h-4' : 'i-ph:device-mobile w-4 h-4'} />
-            </button>
+            </ToolbarIconButton>
 
             {mobileView && (
-              <button
-                type="button"
+              <ToolbarIconButton
+                tooltip={landscape ? 'Switch to portrait' : 'Switch to landscape'}
                 className={iconBtn(false, landscape)}
-                title={landscape ? 'Portrait' : 'Landscape'}
-                aria-label={landscape ? 'Portrait' : 'Landscape'}
                 aria-pressed={landscape}
                 onClick={onToggleLandscape}
               >
                 <div className="i-ph:device-rotate w-4 h-4" />
-              </button>
+              </ToolbarIconButton>
             )}
 
-            <button
-              type="button"
+            <ToolbarIconButton
+              tooltip={inspectorMode ? 'Stop click-to-edit' : 'Click an element in the preview to edit it'}
               className={iconBtn(false, inspectorMode)}
-              title={inspectorMode ? 'Stop click-to-edit' : 'Click-to-edit: select an element in the preview'}
-              aria-label={inspectorMode ? 'Stop click-to-edit' : 'Click-to-edit'}
               aria-pressed={inspectorMode}
               onClick={onToggleInspector}
             >
               <div className="i-ph:cursor-click w-4 h-4" />
-            </button>
+            </ToolbarIconButton>
 
-            <button type="button" className={iconBtn()} title="Reload" aria-label="Reload" onClick={onReload}>
+            <ToolbarIconButton tooltip="Reload preview" className={iconBtn()} onClick={onReload}>
               <div className="i-ph:arrow-clockwise w-4 h-4" />
-            </button>
-            <button
-              type="button"
+            </ToolbarIconButton>
+            <ToolbarIconButton
+              tooltip="Copy preview link"
               className={iconBtn()}
-              title="Open in new tab"
-              aria-label="Open in new tab"
+              onClick={() => void copyPreviewLink(activeBaseUrl)}
+            >
+              <div className="i-ph:copy w-4 h-4" />
+            </ToolbarIconButton>
+            <ToolbarIconButton
+              tooltip="Open preview in a new tab"
+              className={iconBtn()}
               onClick={() => window.open(activeBaseUrl, '_blank')}
             >
               <div className="i-ph:arrow-square-out w-4 h-4" />
-            </button>
+            </ToolbarIconButton>
           </>
         )}
       </div>
@@ -266,6 +282,7 @@ export const AppPreview = memo(
     const previews = useStore(workbenchStore.previews);
     const previewHealth = useStore(previewHealthStore);
     const reloadToken = useStore(dockerPreviewReloadToken);
+    const previewBusy = useStore(dockerPreviewBusy);
     const iframeRef = useRef<HTMLIFrameElement>(null);
     const [previewBust, setPreviewBust] = useState(() => Date.now());
     const hasSelectedPreview = useRef(false);
@@ -343,13 +360,24 @@ export const AppPreview = memo(
     const active = readyPreviews[activeIndex] ?? readyPreviews[0];
     const embedUrl = active?.baseUrl ? toEmbeddablePreviewUrl(active.baseUrl) : undefined;
 
+    const iframeSrc = embedUrl ? withPreviewCacheBust(embedUrl, previewBust) : undefined;
+    const liveUi = useLivePreviewUi(embedUrl || '');
+    const prevHealthRef = useRef(previewHealth.status);
+
     useEffect(() => {
       if (reloadToken > 0) {
         setPreviewBust(Date.now());
       }
     }, [reloadToken]);
 
-    const iframeSrc = embedUrl ? withPreviewCacheBust(embedUrl, previewBust) : undefined;
+    useEffect(() => {
+      const prev = prevHealthRef.current;
+      prevHealthRef.current = previewHealth.status;
+
+      if (prev !== 'healthy' && previewHealth.status === 'healthy') {
+        setPreviewBust(Date.now());
+      }
+    }, [previewHealth.status]);
 
     const reload = useCallback(() => {
       setPreviewBust(Date.now());
@@ -409,35 +437,47 @@ export const AppPreview = memo(
     return (
       <div className="flex h-full w-full flex-col bg-bolt-elements-background-depth-1">
         {toolbar}
+        {liveUi.showBar && embedUrl ? (
+          <LivePreviewBar previewUrl={embedUrl} onDismiss={liveUi.dismissBar} />
+        ) : null}
         <div className="relative min-h-0 flex-1">
           <PreviewBrandBadge />
+          {liveUi.showMoment && embedUrl ? (
+            <LivePreviewOverlay previewUrl={embedUrl} onDismiss={liveUi.dismissMoment} />
+          ) : null}
           {inspectorMode && (
             <div className="pointer-events-none absolute left-3 right-3 top-3 z-10 rounded-md border border-accent-500/30 bg-accent-500/10 px-3 py-1.5 text-center text-xs text-bolt-elements-textPrimary backdrop-blur-sm">
               Click an element in the app, then describe the change in chat
             </div>
           )}
 
-          {(previewHealth.status === 'recovering' || previewHealth.status === 'unreachable') && (
+          {(previewBusy || previewHealth.status === 'recovering' || previewHealth.status === 'unreachable') && (
             <div
               className="absolute inset-0 z-20 flex items-center justify-center bg-bolt-elements-background-depth-1/90 px-6 backdrop-blur-sm"
               role="status"
             >
               <div className="max-w-sm text-center">
-                {previewHealth.status === 'recovering' ? (
-                  <div className="i-svg-spinners:90-ring-with-bg mx-auto mb-3 h-8 w-8 text-accent-500" />
-                ) : (
+                {previewHealth.status === 'unreachable' && !previewBusy ? (
                   <div className="i-ph:warning-circle mx-auto mb-3 h-8 w-8 text-red-500" />
+                ) : (
+                  <div className="i-svg-spinners:90-ring-with-bg mx-auto mb-3 h-8 w-8 text-accent-500" />
                 )}
                 <p className="text-sm font-medium text-bolt-elements-textPrimary">
-                  {previewHealth.status === 'recovering' ? 'Fixing preview…' : 'Preview not responding'}
+                  {previewBusy
+                    ? 'Updating preview…'
+                    : previewHealth.status === 'recovering'
+                      ? 'Fixing preview…'
+                      : 'Preview not responding'}
                 </p>
                 <p className="mt-1 text-xs text-bolt-elements-textSecondary">
-                  {previewHealth.message ||
-                    (previewHealth.status === 'recovering'
-                      ? 'Restarting the app server in Docker.'
-                      : 'The preview URL did not return a valid page.')}
+                  {previewBusy
+                    ? 'Restarting the app so your latest changes show up.'
+                    : previewHealth.message ||
+                      (previewHealth.status === 'recovering'
+                        ? 'Restarting the app server in Docker.'
+                        : 'The preview URL did not return a valid page.')}
                 </p>
-                {previewHealth.status === 'unreachable' && (
+                {previewHealth.status === 'unreachable' && !previewBusy && (
                   <button
                     type="button"
                     className="mt-4 rounded-md bg-accent-500 px-4 py-2 text-sm font-medium text-white hover:bg-accent-600"

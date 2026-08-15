@@ -1,5 +1,5 @@
 import type { TabType } from './types';
-import { User, Settings, Bell, Star, Database, Cloud, Laptop, Github, Wrench, List } from 'lucide-react';
+import { User, Settings, Bell, Star, Database, SlidersHorizontal, Laptop, Github, Wrench, List, CreditCard } from 'lucide-react';
 
 // GitLab icon component
 const GitLabIcon = () => (
@@ -44,7 +44,7 @@ export const TAB_ICONS: Record<TabType, React.ComponentType<{ className?: string
   notifications: Bell,
   features: Star,
   data: Database,
-  'cloud-providers': Cloud,
+  'cloud-providers': SlidersHorizontal,
   'local-providers': Laptop,
   github: Github,
   gitlab: () => <GitLabIcon />,
@@ -53,6 +53,7 @@ export const TAB_ICONS: Record<TabType, React.ComponentType<{ className?: string
   supabase: () => <SupabaseIcon />,
   'event-logs': List,
   mcp: Wrench,
+  subscription: CreditCard,
 };
 
 export const TAB_LABELS: Record<TabType, string> = {
@@ -61,7 +62,7 @@ export const TAB_LABELS: Record<TabType, string> = {
   notifications: 'Notifications',
   features: 'Features',
   data: 'Data Management',
-  'cloud-providers': 'Cloud Providers',
+  'cloud-providers': 'Model Settings',
   'local-providers': 'Local Providers',
   github: 'GitHub',
   gitlab: 'GitLab',
@@ -70,6 +71,7 @@ export const TAB_LABELS: Record<TabType, string> = {
   supabase: 'Supabase',
   'event-logs': 'Event Logs',
   mcp: 'MCP Servers',
+  subscription: 'Billing',
 };
 
 export const TAB_DESCRIPTIONS: Record<TabType, string> = {
@@ -78,7 +80,7 @@ export const TAB_DESCRIPTIONS: Record<TabType, string> = {
   notifications: 'View and manage your notifications',
   features: 'Explore new and upcoming features',
   data: 'Manage your data and storage',
-  'cloud-providers': 'Configure cloud AI providers and models',
+  'cloud-providers': 'View and change your AI provider, model, and API key',
   'local-providers': 'Configure local AI providers and models',
   github: 'Connect and manage GitHub integration',
   gitlab: 'Connect and manage GitLab integration',
@@ -87,6 +89,7 @@ export const TAB_DESCRIPTIONS: Record<TabType, string> = {
   supabase: 'Setup Supabase database connection',
   'event-logs': 'View system events and logs',
   mcp: 'Configure MCP (Model Context Protocol) servers',
+  subscription: 'Current plan, upgrade, and payment history',
 };
 
 /** Shown on the Control Panel home by default (Configure integrations). */

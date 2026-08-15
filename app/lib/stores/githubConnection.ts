@@ -99,6 +99,10 @@ export const githubConnectionStore = {
       // Update atom
       githubConnectionAtom.set(connection);
 
+      void import('~/lib/supabase/user-integrations').then(({ schedulePersistIntegrations }) => {
+        schedulePersistIntegrations();
+      });
+
       logStore.logInfo('Connected to GitHub', {
         type: 'system',
         message: `Connected to GitHub as ${user.login}`,
@@ -139,6 +143,10 @@ export const githubConnectionStore = {
 
     // Clear API service cache
     gitHubApiService.clearCache();
+
+    void import('~/lib/supabase/user-integrations').then(({ schedulePersistIntegrations }) => {
+      schedulePersistIntegrations();
+    });
 
     logStore.logInfo('Disconnected from GitHub', {
       type: 'system',
@@ -207,6 +215,10 @@ export const githubConnectionStore = {
 
     githubConnectionAtom.set(updatedConnection);
     localStorage.setItem('github_connection', JSON.stringify(updatedConnection));
+
+    void import('~/lib/supabase/user-integrations').then(({ schedulePersistIntegrations }) => {
+      schedulePersistIntegrations();
+    });
   },
 
   // Clear stats cache

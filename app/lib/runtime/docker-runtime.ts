@@ -10,6 +10,9 @@ import { isDockerRuntimeAvailable, setDockerRuntimeAvailable } from './deploymen
 /** Bumps when Docker files change so the iframe reloads once — without mutating the stored preview URL. */
 export const dockerPreviewReloadToken = atom(0);
 
+/** True while a follow-up restart is killing/booting the preview process. */
+export const dockerPreviewBusy = atom(false);
+
 const RELOAD_QUERY = '_bl';
 const SKIP_RELOAD_FILES = /(?:^|\/)(?:\.buildlive-|buildlive-inspector\.js$|vite\.config\.)/;
 
@@ -92,7 +95,8 @@ export class DockerRuntime implements AppRuntime {
   #lastPreviewUrl: string | undefined;
   #lastPreviewPort: number | undefined;
   #reloadTimer: ReturnType<typeof setTimeout> | undefined;
-  #redeployInFlight = false;
+  #previewLock: Promise<unknown> = Promise.resolve();
+  #filesWrittenSinceRedeploy = false;
   #consecutiveFailures = 0;
   #healthInFlight: Promise<boolean> | undefined;
   /** When reopening a chat, skip rewriting files/exec/start that are already on disk. */
@@ -285,7 +289,11 @@ export class DockerRuntime implements AppRuntime {
 
     if (!this.#hydrateSkipWrites && !SKIP_RELOAD_FILES.test(normalized)) {
       // Host bind-mount writes don't invalidate Vite's in-memory transform cache.
-      this.#schedulePreviewRedeploy();
+      this.#filesWrittenSinceRedeploy = true;
+
+      if (this.#lastPreviewUrl) {
+        this.#schedulePreviewRedeploy();
+      }
     }
   }
 
@@ -294,6 +302,45 @@ export class DockerRuntime implements AppRuntime {
    */
   reloadPreview(): void {
     this.#schedulePreviewRedeploy(0);
+  }
+
+  /**
+   * After a chat turn finishes (including "Ask BuildLive" error fixes), wait for
+   * pending file writes to land, restart if needed, then remount the iframe.
+   */
+  async flushPreview(): Promise<void> {
+    if (this.#hydrateSkipWrites) {
+      return;
+    }
+
+    await this.ensureSession();
+
+    if (this.#reloadTimer) {
+      clearTimeout(this.#reloadTimer);
+      this.#reloadTimer = undefined;
+    }
+
+    // Wait for an in-flight start/restart so we don't kill a server that just came up
+    await this.#withPreviewLock(async () => undefined);
+
+    if (this.#filesWrittenSinceRedeploy || !this.#lastPreviewUrl) {
+      const preview = await this.#redeployPreview();
+
+      if (preview) {
+        return;
+      }
+    }
+
+    if (this.#lastPreviewUrl) {
+      const reachable = await verifyPreviewReachable(this.#lastPreviewUrl);
+
+      if (!reachable) {
+        await this.#redeployPreview();
+        return;
+      }
+
+      this.#bumpReloadToken();
+    }
   }
 
   /**
@@ -307,31 +354,23 @@ export class DockerRuntime implements AppRuntime {
       return null;
     }
 
-    try {
-      const res = await fetch(`${this.#daemonUrl}/sessions/${this.#sessionId}/restart`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-      });
-
-      const data = (await res.json().catch(() => ({}))) as {
-        error?: string;
-        preview?: { port: number; hostPort: number; url: string; ready: boolean } | null;
-      };
-
-      if (!res.ok || !data.preview?.ready || !data.preview.url) {
-        console.warn('[DockerRuntime] recoverPreview failed:', data.error);
-        return null;
+    return this.#withPreviewLock(async () => {
+      if (this.#lastPreviewUrl && (await verifyPreviewReachable(this.#lastPreviewUrl))) {
+        return {
+          port: this.#lastPreviewPort || 5173,
+          ready: true,
+          baseUrl: this.#lastPreviewUrl,
+        };
       }
 
-      this.#lastPreviewUrl = undefined;
-      const event = toPreviewEvent(data.preview);
-      this.#emitPreview(event);
-      return event;
-    } catch (error) {
-      console.warn('[DockerRuntime] recoverPreview failed:', error);
-      return null;
-    }
+      dockerPreviewBusy.set(true);
+
+      try {
+        return await this.#restartPreviewProcess();
+      } finally {
+        dockerPreviewBusy.set(false);
+      }
+    });
   }
 
   #schedulePreviewRedeploy(delayMs = 1500) {
@@ -349,12 +388,24 @@ export class DockerRuntime implements AppRuntime {
     }, delayMs);
   }
 
-  async #redeployPreview(): Promise<void> {
-    if (this.#hydrateSkipWrites || !this.#sessionId || this.#redeployInFlight) {
-      return;
-    }
+  #bumpReloadToken() {
+    dockerPreviewReloadToken.set(dockerPreviewReloadToken.get() + 1);
+  }
 
-    this.#redeployInFlight = true;
+  #withPreviewLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.#previewLock.then(fn, fn);
+    this.#previewLock = run.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    return run;
+  }
+
+  async #restartPreviewProcess(): Promise<PreviewInfoEvent | null> {
+    if (!this.#sessionId) {
+      return null;
+    }
 
     try {
       const res = await fetch(`${this.#daemonUrl}/sessions/${this.#sessionId}/restart`, {
@@ -369,19 +420,44 @@ export class DockerRuntime implements AppRuntime {
       };
 
       if (!res.ok || !data.preview?.ready || !data.preview.url) {
-        console.warn('[DockerRuntime] follow-up restart failed:', data.error);
-        return;
+        console.warn('[DockerRuntime] preview restart failed:', data.error);
+        return null;
       }
 
       // Allow re-emit even if host port/URL are unchanged
       this.#lastPreviewUrl = undefined;
-      this.#emitPreview(toPreviewEvent(data.preview));
-      dockerPreviewReloadToken.set(dockerPreviewReloadToken.get() + 1);
+      const event = toPreviewEvent(data.preview);
+      this.#emitPreview(event);
+      this.#bumpReloadToken();
+      this.#filesWrittenSinceRedeploy = false;
+
+      return event;
     } catch (error) {
-      console.warn('[DockerRuntime] follow-up restart failed:', error);
-    } finally {
-      this.#redeployInFlight = false;
+      console.warn('[DockerRuntime] preview restart failed:', error);
+      return null;
     }
+  }
+
+  async #redeployPreview(): Promise<PreviewInfoEvent | null> {
+    if (this.#hydrateSkipWrites || !this.#sessionId) {
+      return null;
+    }
+
+    return this.#withPreviewLock(async () => {
+      dockerPreviewBusy.set(true);
+
+      try {
+        let lastResult: PreviewInfoEvent | null = null;
+
+        do {
+          lastResult = await this.#restartPreviewProcess();
+        } while (lastResult && this.#filesWrittenSinceRedeploy);
+
+        return lastResult;
+      } finally {
+        dockerPreviewBusy.set(false);
+      }
+    });
   }
 
   async mkdir(dirPath: string, _options?: { recursive?: boolean }): Promise<void> {
@@ -450,42 +526,58 @@ export class DockerRuntime implements AppRuntime {
     }
 
     /*
-     * Follow-up start: don't kill Vite per action. Files already scheduled a
-     * single debounced process restart after the write burst.
+     * Follow-up start: don't fire a second /start. File writes already marked
+     * the preview dirty; wait for that restart so the iframe reloads after.
      */
     if (this.#lastPreviewUrl) {
-      this.#schedulePreviewRedeploy();
-      return {
-        port: this.#lastPreviewPort || 5173,
-        ready: true,
-        baseUrl: this.#lastPreviewUrl,
-      };
+      if (this.#reloadTimer) {
+        clearTimeout(this.#reloadTimer);
+        this.#reloadTimer = undefined;
+      }
+
+      const preview = await this.#redeployPreview();
+
+      if (preview) {
+        return preview;
+      }
     }
 
-    const res = await fetch(`${this.#daemonUrl}/sessions/${this.#sessionId}/start`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command, resume: false }),
+    return this.#withPreviewLock(async () => {
+      dockerPreviewBusy.set(true);
+
+      try {
+        const res = await fetch(`${this.#daemonUrl}/sessions/${this.#sessionId}/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command, resume: false }),
+        });
+
+        const data = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          output?: string;
+          resumed?: boolean;
+          preview?: { port: number; hostPort: number; url: string; ready: boolean } | null;
+        };
+
+        if (!res.ok) {
+          throw new Error(data.error || data.output || 'Docker start failed');
+        }
+
+        if (data.preview?.url && data.preview.ready) {
+          this.#lastPreviewUrl = undefined;
+          const event = toPreviewEvent(data.preview);
+          this.#emitPreview(event);
+          this.#bumpReloadToken();
+          this.#filesWrittenSinceRedeploy = false;
+
+          return event;
+        }
+
+        throw new Error(data.output || 'Preview server did not become ready');
+      } finally {
+        dockerPreviewBusy.set(false);
+      }
     });
-
-    const data = (await res.json().catch(() => ({}))) as {
-      error?: string;
-      output?: string;
-      resumed?: boolean;
-      preview?: { port: number; hostPort: number; url: string; ready: boolean } | null;
-    };
-
-    if (!res.ok) {
-      throw new Error(data.error || data.output || 'Docker start failed');
-    }
-
-    if (data.preview?.url && data.preview.ready) {
-      const event = toPreviewEvent(data.preview);
-      this.#emitPreview(event);
-      return event;
-    }
-
-    throw new Error(data.output || 'Preview server did not become ready');
   }
 
   onPreview(callback: PreviewListener): () => void {

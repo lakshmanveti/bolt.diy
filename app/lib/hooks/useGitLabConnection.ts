@@ -54,22 +54,6 @@ export function useGitLabConnection(): UseGitLabConnectionReturn {
         return;
       }
 
-      // Load saved connection from localStorage
-      const savedConnection = localStorage.getItem(STORAGE_KEY);
-
-      if (savedConnection) {
-        const parsed = JSON.parse(savedConnection);
-
-        if (parsed.user && parsed.token) {
-          // Update the store with saved connection
-          gitlabConnectionStore.setGitLabUrl(parsed.gitlabUrl || 'https://gitlab.com');
-          gitlabConnectionStore.setToken(parsed.token);
-
-          // Test the connection to make sure it's still valid
-          await refreshConnectionData(parsed);
-        }
-      }
-
       setIsLoading(false);
     } catch (error) {
       console.error('Error loading saved connection:', error);

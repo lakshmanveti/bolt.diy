@@ -8,8 +8,8 @@ import { resetTabConfiguration, tabConfigurationStore } from '~/lib/stores/setti
 /** Always-available app settings (not only integration tiles from DEFAULT_TAB_CONFIG). */
 const CORE_APP_TABS: TabType[] = ['settings', 'notifications', 'features', 'data'];
 
-/** Profile tab is handled by the separate Account entry in the avatar menu. */
-const AVATAR_MENU_EXCLUDED_TABS = new Set<TabType>(['profile']);
+/** Profile is the Account row. Local Providers stays in Control Panel, not the avatar menu. */
+const AVATAR_MENU_EXCLUDED_TABS = new Set<TabType>(['profile', 'local-providers']);
 
 export function useVisibleUserTabs() {
   const tabConfiguration = useStore(tabConfigurationStore);

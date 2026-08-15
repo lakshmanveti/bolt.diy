@@ -1,6 +1,8 @@
 import Cookies from 'js-cookie';
 import { atom } from 'nanostores';
 import type { IProviderSetting } from '~/types/model';
+import { LOCAL_PROVIDERS } from '~/lib/stores/settings';
+import { isHostedPlanActive } from '~/lib/billing/subscription';
 import { getSupabaseClient, requireAuthUser } from '~/lib/supabase/client';
 import { createScopedLogger } from '~/utils/logger';
 
@@ -32,6 +34,8 @@ export const userPreferenceDocumentStore = atom<UserPreferenceDocument | null>(n
 export const userPreferencesStore = atom<LlmUserPreferences | null>(null);
 export const userPreferencesReadyStore = atom(false);
 export const chatLlmConfigReadyStore = atom(false);
+
+let preferenceLoadPromise: Promise<UserPreferenceDocument | null> | null = null;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -73,13 +77,7 @@ export function parseLlmPreferences(doc: UserPreferenceDocument | null | undefin
     return null;
   }
 
-  const apiKeysRaw = llm.apiKeys;
-
-  const apiKeys: Record<string, string> = isPlainObject(apiKeysRaw)
-    ? Object.fromEntries(
-        Object.entries(apiKeysRaw).filter(([, v]) => typeof v === 'string') as [string, string][],
-      )
-    : {};
+  const apiKeys = extractLlmApiKeysFromDocument({ [LLM_PREFERENCE_KEY]: llm });
 
   let providerSettings: Record<string, IProviderSetting> | undefined;
 
@@ -88,6 +86,134 @@ export function parseLlmPreferences(doc: UserPreferenceDocument | null | undefin
   }
 
   return { provider, model, apiKeys, providerSettings };
+}
+
+function parseApiKeysRecord(raw: unknown): Record<string, string> {
+  if (typeof raw === 'string') {
+    try {
+      return parseApiKeysRecord(JSON.parse(raw));
+    } catch {
+      return {};
+    }
+  }
+
+  if (!isPlainObject(raw)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(raw).filter(([, value]) => typeof value === 'string') as [string, string][],
+  );
+}
+
+function findApiKeyForProvider(apiKeys: Record<string, string>, provider: string): string {
+  const direct = apiKeys[provider]?.trim();
+
+  if (direct) {
+    return direct;
+  }
+
+  const providerLower = provider.toLowerCase();
+
+  for (const [name, key] of Object.entries(apiKeys)) {
+    if (name.toLowerCase() === providerLower && key?.trim()) {
+      return key.trim();
+    }
+  }
+
+  return '';
+}
+
+/** Collect API keys from all known shapes inside the preference document. */
+export function extractLlmApiKeysFromDocument(doc: UserPreferenceDocument | null | undefined): Record<string, string> {
+  const merged: Record<string, string> = {};
+
+  if (!doc) {
+    return merged;
+  }
+
+  if (isPlainObject(doc[LLM_PREFERENCE_KEY])) {
+    const llm = doc[LLM_PREFERENCE_KEY] as Record<string, unknown>;
+    Object.assign(merged, parseApiKeysRecord(llm.apiKeys ?? llm.api_keys));
+
+    const provider = typeof llm.provider === 'string' ? llm.provider.trim() : '';
+
+    if (typeof llm.apiKey === 'string' && llm.apiKey.trim() && provider) {
+      merged[provider] = llm.apiKey.trim();
+    }
+  }
+
+  Object.assign(merged, parseApiKeysRecord(doc.apiKeys ?? doc.api_keys));
+
+  return merged;
+}
+
+/** Resolve API key for the selected provider from account preferences (all document shapes). */
+export function resolveStoredProviderApiKey(
+  prefs: LlmUserPreferences | null,
+  doc?: UserPreferenceDocument | null,
+): string {
+  const provider = prefs?.provider?.trim();
+
+  if (!provider) {
+    return '';
+  }
+
+  const mergedKeys: Record<string, string> = {
+    ...extractLlmApiKeysFromDocument(doc),
+    ...(prefs?.apiKeys ?? {}),
+  };
+
+  return findApiKeyForProvider(mergedKeys, provider);
+}
+
+/** Merge account preferences, document, and optional cookie keys for display. */
+export function resolveEffectiveProviderApiKey(
+  prefs: LlmUserPreferences | null,
+  doc?: UserPreferenceDocument | null,
+  extraKeys?: Record<string, string>,
+): string {
+  const provider = prefs?.provider?.trim();
+
+  if (!provider) {
+    return '';
+  }
+
+  const mergedKeys: Record<string, string> = {
+    ...extractLlmApiKeysFromDocument(doc),
+    ...(prefs?.apiKeys ?? {}),
+    ...(extraKeys ?? {}),
+  };
+
+  const matched = findApiKeyForProvider(mergedKeys, provider);
+
+  if (matched) {
+    return matched;
+  }
+
+  const nonEmpty = Object.entries(mergedKeys).filter(([, value]) => value?.trim());
+
+  if (nonEmpty.length === 1) {
+    return nonEmpty[0]![1].trim();
+  }
+
+  return '';
+}
+
+function mergeApiKeyRecords(...sources: Record<string, string>[]): Record<string, string> {
+  const merged: Record<string, string> = {};
+
+  for (const source of sources) {
+    for (const [name, value] of Object.entries(source)) {
+      const trimmed = value?.trim();
+
+      if (trimmed) {
+        merged[name] = trimmed;
+      }
+    }
+  }
+
+  return merged;
 }
 
 function applyDocumentToStores(doc: UserPreferenceDocument | null) {
@@ -108,64 +234,73 @@ export function getPreferenceSection<T extends Record<string, unknown>>(
   return doc[key] as T;
 }
 
-export async function checkProviderEnvApiKey(providerName: string): Promise<boolean> {
-  try {
-    const response = await fetch(`/api/check-env-key?provider=${encodeURIComponent(providerName)}`);
-
-    if (!response.ok) {
-      return false;
-    }
-
-    const data = (await response.json()) as { isSet?: boolean };
-    return Boolean(data.isSet);
-  } catch {
-    return false;
-  }
-}
-
-export function hasProviderApiKey(prefs: LlmUserPreferences | null, envKeySet = false): boolean {
+export function hasProviderApiKey(
+  prefs: LlmUserPreferences | null,
+  doc?: UserPreferenceDocument | null,
+): boolean {
   if (!prefs?.provider) {
     return false;
   }
 
-  const key = prefs.apiKeys[prefs.provider]?.trim();
-  return Boolean(key) || envKeySet;
+  if (LOCAL_PROVIDERS.includes(prefs.provider)) {
+    return true;
+  }
+
+  return Boolean(resolveStoredProviderApiKey(prefs, doc ?? userPreferenceDocumentStore.get()));
 }
 
-export function isLlmPreferencesComplete(prefs: LlmUserPreferences | null, envKeySet = false): boolean {
+export function isLlmPreferencesComplete(
+  prefs: LlmUserPreferences | null,
+  doc?: UserPreferenceDocument | null,
+): boolean {
+  if (isHostedPlanActive()) {
+    return true;
+  }
+
   if (!prefs) {
     return false;
   }
 
-  return Boolean(prefs.provider?.trim() && prefs.model?.trim() && hasProviderApiKey(prefs, envKeySet));
+  return Boolean(prefs.provider?.trim() && prefs.model?.trim() && hasProviderApiKey(prefs, doc));
 }
 
 export async function evaluateChatLlmConfig(prefs: LlmUserPreferences | null): Promise<boolean> {
-  // Stored API key is enough — avoid async env check so UI does not flash setup while waiting.
-  if (isLlmPreferencesComplete(prefs)) {
-    chatLlmConfigReadyStore.set(true);
-    return true;
-  }
-
-  if (!prefs?.provider?.trim() || !prefs?.model?.trim()) {
-    chatLlmConfigReadyStore.set(false);
-    return false;
-  }
-
-  const envKeySet = await checkProviderEnvApiKey(prefs.provider);
-  const ready = isLlmPreferencesComplete(prefs, envKeySet);
+  const doc = userPreferenceDocumentStore.get();
+  const ready = isLlmPreferencesComplete(prefs, doc);
   chatLlmConfigReadyStore.set(ready);
   return ready;
 }
 
 async function finishPreferenceLoad(llm: LlmUserPreferences | null): Promise<void> {
+  if (llm) {
+    syncLlmPreferencesToCookies(llm);
+  } else {
+    const user = await requireAuthUser();
+
+    if (user) {
+      Cookies.remove('apiKeys');
+    }
+  }
+
   await evaluateChatLlmConfig(llm);
   userPreferencesReadyStore.set(true);
 }
 
-export async function loadUserPreferenceDocument(): Promise<UserPreferenceDocument | null> {
-  userPreferencesReadyStore.set(false);
+export async function loadUserPreferenceDocument(options?: {
+  force?: boolean;
+}): Promise<UserPreferenceDocument | null> {
+  if (preferenceLoadPromise && !options?.force) {
+    return preferenceLoadPromise;
+  }
 
+  preferenceLoadPromise = loadUserPreferenceDocumentInternal().finally(() => {
+    preferenceLoadPromise = null;
+  });
+
+  return preferenceLoadPromise;
+}
+
+async function loadUserPreferenceDocumentInternal(): Promise<UserPreferenceDocument | null> {
   const supabase = getSupabaseClient();
   const user = await requireAuthUser();
 
@@ -194,6 +329,7 @@ export async function loadUserPreferenceDocument(): Promise<UserPreferenceDocume
     const row = data as UserPreferenceRow;
     const doc = isPlainObject(row.preferences) ? row.preferences : {};
     applyDocumentToStores(doc);
+    await applySavedIntegrations(doc);
     await finishPreferenceLoad(parseLlmPreferences(doc));
     return doc;
   } catch (error) {
@@ -201,6 +337,19 @@ export async function loadUserPreferenceDocument(): Promise<UserPreferenceDocume
     applyDocumentToStores(null);
     await finishPreferenceLoad(null);
     return null;
+  }
+}
+
+async function applySavedIntegrations(doc: UserPreferenceDocument | null) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    const { applyIntegrationsFromDocument } = await import('~/lib/supabase/user-integrations');
+    applyIntegrationsFromDocument(doc);
+  } catch (error) {
+    logger.warn('Failed to apply saved integrations', error);
   }
 }
 
@@ -246,11 +395,14 @@ export async function patchUserPreferences(patch: UserPreferenceDocument): Promi
 }
 
 export async function saveLlmPreferences(prefs: LlmUserPreferences): Promise<LlmUserPreferences> {
+  const existingKeys = extractLlmApiKeysFromDocument(userPreferenceDocumentStore.get());
+  const mergedApiKeys = mergeApiKeyRecords(existingKeys, prefs.apiKeys);
+
   const doc = await patchUserPreferences({
     [LLM_PREFERENCE_KEY]: {
       provider: prefs.provider.trim(),
       model: prefs.model.trim(),
-      apiKeys: prefs.apiKeys,
+      apiKeys: mergedApiKeys,
       providerSettings: prefs.providerSettings ?? null,
     },
   });
@@ -272,6 +424,8 @@ export async function saveUserPreferences(prefs: LlmUserPreferences): Promise<Ll
 export function syncLlmPreferencesToCookies(prefs: LlmUserPreferences) {
   Cookies.set('selectedProvider', prefs.provider, { expires: 30 });
   Cookies.set('selectedModel', prefs.model, { expires: 30 });
+
+  // Cookies mirror account preferences only — do not preserve stale keys from older sessions.
   Cookies.set('apiKeys', JSON.stringify(prefs.apiKeys), { expires: 30 });
 
   if (prefs.providerSettings) {

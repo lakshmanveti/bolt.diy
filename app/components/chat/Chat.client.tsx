@@ -9,10 +9,12 @@ import { getDockerRuntime } from '~/lib/runtime';
 import { description, useChatHistory } from '~/lib/persistence';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { getEnvBlockedLlmProviders, isBlockedLlmProvider } from '~/lib/modules/llm/defaults';
-import { authReadyStore, authUserStore, isSupabaseConfigured } from '~/lib/supabase/client';
+import { getEnvBlockedLlmProviders, getEnvDefaultLlmModel, getEnvDefaultLlmProvider, isBlockedLlmProvider } from '~/lib/modules/llm/defaults';
+import { authReadyStore, authSessionStore, authUserStore, isSupabaseConfigured } from '~/lib/supabase/client';
+import { isHostedPlanActive, userSubscriptionStore } from '~/lib/billing/subscription';
 import {
   chatLlmConfigReadyStore,
+  evaluateChatLlmConfig,
   loadUserPreferences,
   saveUserPreferences,
   syncPreferencesToCookies,
@@ -130,13 +132,16 @@ export const ChatImpl = memo(
     const { activeProviders, promptId, autoSelectTemplate, contextOptimizationEnabled } = useSettings();
     const authReady = useStore(authReadyStore);
     const authUser = useStore(authUserStore);
+    const authSession = useStore(authSessionStore);
     const userPreferencesReady = useStore(userPreferencesReadyStore);
     const chatLlmConfigReady = useStore(chatLlmConfigReadyStore);
     const storedUserPreferences = useStore(userPreferencesStore);
+    const subscription = useStore(userSubscriptionStore);
     const [llmErrorAlert, setLlmErrorAlert] = useState<LlmErrorAlertType | undefined>(undefined);
     const [model, setModel] = useState('');
     const [provider, setProvider] = useState<ProviderInfo>(DEFAULT_PROVIDER as ProviderInfo);
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
+    const appliedPreferencesKeyRef = useRef<string | null>(null);
 
     useEffect(() => {
       if (!isSupabaseConfigured()) {
@@ -175,23 +180,67 @@ export const ChatImpl = memo(
     }, [authReady, authUser?.id]);
 
     useEffect(() => {
-      if (!storedUserPreferences) {
+      void evaluateChatLlmConfig(userPreferencesStore.get());
+
+      if (!isHostedPlanActive()) {
         return;
       }
+
+      const envProvider = getEnvDefaultLlmProvider();
+      const envModel = getEnvDefaultLlmModel();
+
+      if (!storedUserPreferences?.provider && envProvider) {
+        const matched = PROVIDER_LIST.find((p) => p.name === envProvider);
+
+        if (matched) {
+          setProvider(matched as ProviderInfo);
+        }
+      }
+
+      if (!storedUserPreferences?.model && envModel) {
+        setModel(envModel);
+      }
+    }, [subscription, storedUserPreferences]);
+
+    useEffect(() => {
+      if (!storedUserPreferences) {
+        appliedPreferencesKeyRef.current = null;
+        return;
+      }
+
+      const preferencesKey = JSON.stringify({
+        provider: storedUserPreferences.provider,
+        model: storedUserPreferences.model,
+        apiKeys: storedUserPreferences.apiKeys,
+        providerSettings: storedUserPreferences.providerSettings,
+      });
+
+      if (appliedPreferencesKeyRef.current === preferencesKey) {
+        return;
+      }
+
+      appliedPreferencesKeyRef.current = preferencesKey;
 
       const matchedProvider = PROVIDER_LIST.find((p) => p.name === storedUserPreferences.provider);
 
       if (matchedProvider) {
-        setProvider(matchedProvider as ProviderInfo);
+        setProvider((current) => (current.name === matchedProvider.name ? current : (matchedProvider as ProviderInfo)));
       }
 
       setModel(storedUserPreferences.model);
       setApiKeys(storedUserPreferences.apiKeys);
-      syncPreferencesToCookies(storedUserPreferences);
 
       if (storedUserPreferences.providerSettings) {
+        const currentProviders = providersStore.get();
+
         for (const [name, settings] of Object.entries(storedUserPreferences.providerSettings)) {
-          updateProviderSettings(name, { settings });
+          const existing = currentProviders[name]?.settings;
+
+          if (existing?.enabled === settings.enabled && existing?.baseUrl === settings.baseUrl) {
+            continue;
+          }
+
+          updateProviderSettings(name, settings);
         }
       }
     }, [storedUserPreferences]);
@@ -256,6 +305,9 @@ export const ChatImpl = memo(
       addToolResult,
     } = useChat({
       api: '/api/chat',
+      headers: authSession?.access_token
+        ? { Authorization: `Bearer ${authSession.access_token}` }
+        : undefined,
       body: {
         apiKeys,
         files,
@@ -341,6 +393,20 @@ export const ChatImpl = memo(
         storeMessageHistory,
       });
     }, [messages, isLoading, parseMessages, initialMessages]);
+
+    const wasStreamingRef = useRef(false);
+
+    useEffect(() => {
+      const streaming = isLoading || fakeLoading;
+
+      if (wasStreamingRef.current && !streaming) {
+        window.setTimeout(() => {
+          workbenchStore.schedulePreviewFlush();
+        }, 200);
+      }
+
+      wasStreamingRef.current = streaming;
+    }, [isLoading, fakeLoading]);
 
     const scrollTextArea = () => {
       const textarea = textareaRef.current;
@@ -566,15 +632,7 @@ export const ChatImpl = memo(
           });
 
           if (template !== 'blank') {
-            const temResp = await getTemplates(template, title).catch((e) => {
-              if (e.message.includes('rate limit')) {
-                toast.warning('Rate limit exceeded. Skipping starter template\n Continuing with blank template');
-              } else {
-                toast.warning('Failed to import starter template\n Continuing with blank template');
-              }
-
-              return null;
-            });
+            const temResp = await getTemplates(template, title).catch(() => null);
 
             if (temResp) {
               const { assistantMessage, userMessage } = temResp;
@@ -749,6 +807,10 @@ export const ChatImpl = memo(
     };
 
     const handleApiKeysChange = (providerName: string, apiKey: string) => {
+      if (apiKeys[providerName] === apiKey) {
+        return;
+      }
+
       const next = { ...apiKeys, [providerName]: apiKey };
       setApiKeys(next);
       Cookies.set('apiKeys', JSON.stringify(next), { expires: 30 });
@@ -853,6 +915,7 @@ export const ChatImpl = memo(
         userPreferencesReady={userPreferencesReady}
         onPreferencesSaved={handlePreferencesSaved}
         onApiKeysChange={handleApiKeysChange}
+        apiKeys={apiKeys}
       />
     );
   },

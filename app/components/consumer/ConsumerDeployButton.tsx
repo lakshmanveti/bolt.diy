@@ -16,12 +16,13 @@ import { useGitLabDeploy } from '~/components/deploy/GitLabDeploy.client';
 import { GitHubDeploymentDialog } from '~/components/deploy/GitHubDeploymentDialog';
 import { GitLabDeploymentDialog } from '~/components/deploy/GitLabDeploymentDialog';
 import { openSettingsTab } from '~/lib/stores/settings-modal';
+import { Tooltip } from '~/components/ui/Tooltip';
 
 /**
- * Icon-only deploy control for the consumer preview toolbar.
+ * Deploy control for the consumer preview toolbar and post-preview CTA.
  * Reuses bolt deploy hooks and adds a Configure integrations entry.
  */
-export function ConsumerDeployButton() {
+export function ConsumerDeployButton({ variant = 'icon' }: { variant?: 'icon' | 'labeled' }) {
   const netlifyConn = useStore(netlifyConnection);
   const vercelConn = useStore(vercelConnection);
   const gitlabIsConnected = useStore(isGitLabConnected);
@@ -65,29 +66,54 @@ export function ConsumerDeployButton() {
       },
     );
 
+  const deployTooltip = isDeploying ? `Deploying to ${deployingTo}…` : 'Deploy to Netlify, Vercel, GitHub, or GitLab';
+
   return (
     <>
       <DropdownMenu.Root>
-        <DropdownMenu.Trigger asChild>
-          <button
-            type="button"
-            disabled={disabled}
-            className={classNames(
-              'inline-flex items-center justify-center w-8 h-8 rounded-md',
-              'border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2',
-              'text-bolt-elements-textPrimary hover:bg-bolt-elements-item-backgroundActive transition-colors',
-              'disabled:opacity-50 disabled:cursor-not-allowed',
-            )}
-            title={isDeploying ? `Deploying to ${deployingTo}…` : 'Deploy'}
-            aria-label="Deploy"
-          >
-            {isDeploying ? (
-              <div className="i-svg-spinners:90-ring-with-bg w-4 h-4" />
-            ) : (
-              <div className="i-ph:rocket-launch w-4 h-4" />
-            )}
-          </button>
-        </DropdownMenu.Trigger>
+        <Tooltip content={deployTooltip} delayDuration={200}>
+          <span className="inline-flex">
+            <DropdownMenu.Trigger asChild>
+              {variant === 'labeled' ? (
+                <button
+                  type="button"
+                  disabled={disabled}
+                  className={classNames(
+                    'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium',
+                    'border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2',
+                    'text-bolt-elements-textPrimary hover:bg-bolt-elements-item-backgroundActive',
+                    'disabled:opacity-50 disabled:cursor-not-allowed',
+                  )}
+                >
+                  {isDeploying ? (
+                    <div className="i-svg-spinners:90-ring-with-bg h-4 w-4" />
+                  ) : (
+                    <div className="i-ph:rocket-launch h-4 w-4" />
+                  )}
+                  {isDeploying ? 'Deploying…' : 'Deploy'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={disabled}
+                  className={classNames(
+                    'inline-flex items-center justify-center w-8 h-8 rounded-md',
+                    'border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2',
+                    'text-bolt-elements-textPrimary hover:bg-bolt-elements-item-backgroundActive transition-colors',
+                    'disabled:opacity-50 disabled:cursor-not-allowed',
+                  )}
+                  aria-label={deployTooltip}
+                >
+                  {isDeploying ? (
+                    <div className="i-svg-spinners:90-ring-with-bg w-4 h-4" />
+                  ) : (
+                    <div className="i-ph:rocket-launch w-4 h-4" />
+                  )}
+                </button>
+              )}
+            </DropdownMenu.Trigger>
+          </span>
+        </Tooltip>
         <DropdownMenu.Content
           className={classNames(
             'z-[250]',
@@ -105,7 +131,9 @@ export function ConsumerDeployButton() {
             disabled={disabled || !activePreview || !netlifyConn.user}
             onClick={() => runDeploy('netlify', () => handleNetlifyDeploy())}
           >
-            <img className="w-5 h-5" height="24" width="24" crossOrigin="anonymous" src="https://cdn.simpleicons.org/netlify" alt="" />
+            <Tooltip content={netlifyConn.user ? 'Netlify' : 'Connect Netlify to deploy'} delayDuration={200}>
+              <img className="w-5 h-5" height="24" width="24" crossOrigin="anonymous" src="https://cdn.simpleicons.org/netlify" alt="Netlify" />
+            </Tooltip>
             <span className="flex-1">{!netlifyConn.user ? 'Netlify (not connected)' : 'Deploy to Netlify'}</span>
             {netlifyConn.user && <NetlifyDeploymentLink />}
           </DropdownMenu.Item>
@@ -115,14 +143,16 @@ export function ConsumerDeployButton() {
             disabled={disabled || !activePreview || !vercelConn.user}
             onClick={() => runDeploy('vercel', () => handleVercelDeploy())}
           >
-            <img
-              className="w-5 h-5 bg-black p-1 rounded"
-              height="24"
-              width="24"
-              crossOrigin="anonymous"
-              src="https://cdn.simpleicons.org/vercel/white"
-              alt=""
-            />
+            <Tooltip content={vercelConn.user ? 'Vercel' : 'Connect Vercel to deploy'} delayDuration={200}>
+              <img
+                className="w-5 h-5 bg-black p-1 rounded"
+                height="24"
+                width="24"
+                crossOrigin="anonymous"
+                src="https://cdn.simpleicons.org/vercel/white"
+                alt="Vercel"
+              />
+            </Tooltip>
             <span className="flex-1">{!vercelConn.user ? 'Vercel (not connected)' : 'Deploy to Vercel'}</span>
             {vercelConn.user && <VercelDeploymentLink />}
           </DropdownMenu.Item>
@@ -142,7 +172,9 @@ export function ConsumerDeployButton() {
               })
             }
           >
-            <img className="w-5 h-5" height="24" width="24" crossOrigin="anonymous" src="https://cdn.simpleicons.org/github" alt="" />
+            <Tooltip content="GitHub" delayDuration={200}>
+              <img className="w-5 h-5" height="24" width="24" crossOrigin="anonymous" src="https://cdn.simpleicons.org/github" alt="GitHub" />
+            </Tooltip>
             <span className="flex-1">Deploy to GitHub</span>
           </DropdownMenu.Item>
 
@@ -161,7 +193,9 @@ export function ConsumerDeployButton() {
               })
             }
           >
-            <img className="w-5 h-5" height="24" width="24" crossOrigin="anonymous" src="https://cdn.simpleicons.org/gitlab" alt="" />
+            <Tooltip content={gitlabIsConnected ? 'GitLab' : 'Connect GitLab to deploy'} delayDuration={200}>
+              <img className="w-5 h-5" height="24" width="24" crossOrigin="anonymous" src="https://cdn.simpleicons.org/gitlab" alt="GitLab" />
+            </Tooltip>
             <span className="flex-1">{!gitlabIsConnected ? 'GitLab (not connected)' : 'Deploy to GitLab'}</span>
           </DropdownMenu.Item>
 
@@ -169,9 +203,11 @@ export function ConsumerDeployButton() {
 
           <DropdownMenu.Item
             className="cursor-pointer flex items-center w-full px-4 py-2 text-sm text-bolt-elements-textPrimary hover:bg-bolt-elements-item-backgroundActive gap-2 rounded-md"
-            onClick={() => openSettingsTab('github')}
+            onClick={() => openSettingsTab('integrations')}
           >
-            <div className="i-ph:gear-six w-5 h-5" />
+            <Tooltip content="Connect GitHub, GitLab, Netlify, Vercel, and Supabase" delayDuration={200}>
+              <div className="i-ph:gear-six w-5 h-5" />
+            </Tooltip>
             <span className="flex-1">Configure integrations</span>
           </DropdownMenu.Item>
         </DropdownMenu.Content>

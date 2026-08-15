@@ -11,6 +11,7 @@ import { classNames } from '~/utils/classNames';
 import { PROVIDER_LIST } from '~/utils/constants';
 import { Messages } from './Messages.client';
 import { getApiKeysFromCookies } from './APIKeyManager';
+import { fetchModelList, invalidateModelList } from '~/lib/modules/llm/fetch-models';
 import Cookies from 'js-cookie';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import styles from './BaseChat.module.scss';
@@ -211,52 +212,61 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
     }, []);
 
     useEffect(() => {
-      if (typeof window !== 'undefined') {
-        let parsedApiKeys: Record<string, string> | undefined = {};
-
-        try {
-          parsedApiKeys = getApiKeysFromCookies();
-          setApiKeys(parsedApiKeys);
-        } catch (error) {
-          console.error('Error loading API keys from cookies:', error);
-          Cookies.remove('apiKeys');
-        }
-
-        setIsModelLoading('all');
-        fetch('/api/models')
-          .then((response) => response.json())
-          .then((data) => {
-            const typedData = data as { modelList: ModelInfo[] };
-            setModelList(typedData.modelList);
-          })
-          .catch((error) => {
-            console.error('Error fetching model list:', error);
-          })
-          .finally(() => {
-            setIsModelLoading(undefined);
-          });
+      if (!llmConfigReady || typeof window === 'undefined') {
+        return;
       }
-    }, [providerList, provider]);
+
+      let cancelled = false;
+
+      try {
+        setApiKeys(getApiKeysFromCookies());
+      } catch (error) {
+        console.error('Error loading API keys from cookies:', error);
+        Cookies.remove('apiKeys');
+      }
+
+      setIsModelLoading('all');
+      void fetchModelList()
+        .then((list) => {
+          if (!cancelled) {
+            setModelList(list);
+          }
+        })
+        .catch((error) => {
+          console.error('Error fetching model list:', error);
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setIsModelLoading(undefined);
+          }
+        });
+
+      return () => {
+        cancelled = true;
+      };
+    }, [llmConfigReady]);
 
     const onApiKeysChange = async (providerName: string, apiKey: string) => {
+      if (apiKeys[providerName] === apiKey) {
+        return;
+      }
+
       const newApiKeys = { ...apiKeys, [providerName]: apiKey };
       setApiKeys(newApiKeys);
       Cookies.set('apiKeys', JSON.stringify(newApiKeys));
       onApiKeysChangeProp?.(providerName, apiKey);
 
       setIsModelLoading(providerName);
+      invalidateModelList(providerName);
 
       let providerModels: ModelInfo[] = [];
 
       try {
-        const response = await fetch(`/api/models/${encodeURIComponent(providerName)}`);
-        const data = await response.json();
-        providerModels = (data as { modelList: ModelInfo[] }).modelList;
+        providerModels = await fetchModelList(providerName);
       } catch (error) {
         console.error('Error loading dynamic models for:', providerName, error);
       }
 
-      // Only update models for the specific provider
       setModelList((prevModels) => {
         const otherModels = prevModels.filter((model) => model.provider !== providerName);
         return [...otherModels, ...providerModels];

@@ -70,8 +70,15 @@ export default async function handleRequest(
 
   responseHeaders.set('Content-Type', 'text/html');
 
-  responseHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
-  responseHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
+  // WebContainer needs COEP/COOP. Razorpay Checkout cannot load under require-corp
+  // (checkout.js and the payment iframe are cross-origin). Keep isolation off on /subscribe.
+  const pathname = new URL(request.url).pathname;
+  const allowThirdPartyCheckout = pathname === '/subscribe' || pathname.startsWith('/subscribe/');
+
+  if (!allowThirdPartyCheckout) {
+    responseHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
+    responseHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
+  }
 
   return new Response(body, {
     headers: responseHeaders,

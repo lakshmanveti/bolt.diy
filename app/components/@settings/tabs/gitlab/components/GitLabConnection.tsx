@@ -4,6 +4,7 @@ import { toast } from 'react-toastify';
 import { classNames } from '~/utils/classNames';
 import { Button } from '~/components/ui/Button';
 import { useGitLabConnection } from '~/lib/hooks';
+import { gitlabConnectionStore } from '~/lib/stores/gitlabConnection';
 
 interface ConnectionTestResult {
   status: 'success' | 'error' | 'testing';
@@ -19,8 +20,22 @@ interface GitLabConnectionProps {
 export default function GitLabConnection({ connectionTest, onTestConnection }: GitLabConnectionProps) {
   const { isConnected, isConnecting, connection, error, connect, disconnect } = useGitLabConnection();
 
-  const [token, setToken] = useState('');
-  const [gitlabUrl, setGitlabUrl] = useState('https://gitlab.com');
+  const [token, setToken] = useState(connection?.token || '');
+  const [gitlabUrl, setGitlabUrl] = useState(connection?.gitlabUrl || 'https://gitlab.com');
+
+  React.useEffect(() => {
+    if (isConnected) {
+      return;
+    }
+
+    if (connection?.token) {
+      setToken(connection.token);
+    }
+
+    if (connection?.gitlabUrl) {
+      setGitlabUrl(connection.gitlabUrl);
+    }
+  }, [connection?.token, connection?.gitlabUrl, isConnected]);
 
   const handleConnect = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -75,23 +90,6 @@ export default function GitLabConnection({ connectionTest, onTestConnection }: G
           </div>
         </div>
 
-        {!isConnected && (
-          <div className="text-xs text-bolt-elements-textSecondary bg-bolt-elements-background-depth-1 p-3 rounded-lg mb-4">
-            <p className="flex items-center gap-1 mb-1">
-              <span className="i-ph:lightbulb w-3.5 h-3.5 text-bolt-elements-icon-success" />
-              <span className="font-medium">Tip:</span> You can also set the{' '}
-              <code className="px-1 py-0.5 bg-bolt-elements-background-depth-2 rounded">VITE_GITLAB_ACCESS_TOKEN</code>{' '}
-              environment variable to connect automatically.
-            </p>
-            <p>
-              For self-hosted GitLab instances, also set{' '}
-              <code className="px-1 py-0.5 bg-bolt-elements-background-depth-2 rounded">
-                VITE_GITLAB_URL=https://your-gitlab-instance.com
-              </code>
-            </p>
-          </div>
-        )}
-
         <form onSubmit={handleConnect}>
           <div className="grid grid-cols-1 gap-4">
             <div>
@@ -99,7 +97,11 @@ export default function GitLabConnection({ connectionTest, onTestConnection }: G
               <input
                 type="text"
                 value={gitlabUrl}
-                onChange={(e) => setGitlabUrl(e.target.value)}
+                onChange={(e) => {
+                  const nextUrl = e.target.value;
+                  setGitlabUrl(nextUrl);
+                  gitlabConnectionStore.setGitLabUrl(nextUrl);
+                }}
                 disabled={isConnecting || isConnected}
                 placeholder="https://gitlab.com"
                 className={classNames(
@@ -118,7 +120,11 @@ export default function GitLabConnection({ connectionTest, onTestConnection }: G
               <input
                 type="password"
                 value={token}
-                onChange={(e) => setToken(e.target.value)}
+                onChange={(e) => {
+                  const nextToken = e.target.value;
+                  setToken(nextToken);
+                  gitlabConnectionStore.setToken(nextToken);
+                }}
                 disabled={isConnecting || isConnected}
                 placeholder="Enter your GitLab access token"
                 className={classNames(

@@ -7,6 +7,7 @@ import { useDataOperations } from '~/lib/hooks/useDataOperations';
 import { openDatabase } from '~/lib/persistence/db';
 import { getAllChats, type Chat } from '~/lib/persistence/chats';
 import { DataVisualization } from './DataVisualization';
+import { ApiKeysSummary } from './ApiKeysSummary';
 import { classNames } from '~/utils/classNames';
 import { toast } from 'react-toastify';
 
@@ -105,7 +106,6 @@ export function DataTab() {
     isExporting,
     isImporting,
     isResetting,
-    isDownloadingTemplate,
     handleExportSettings,
     handleExportSelectedSettings,
     handleExportAllChats,
@@ -114,7 +114,6 @@ export function DataTab() {
     handleImportChats,
     handleResetSettings,
     handleResetChats,
-    handleDownloadTemplate,
     handleImportAPIKeys,
   } = useDataOperations({
     customDb: db || undefined, // Pass the boltHistory database, converting null to undefined
@@ -630,42 +629,22 @@ export function DataTab() {
       {/* API Keys Section */}
       <div>
         <h2 className="text-xl font-semibold mb-4 text-bolt-elements-textPrimary">API Keys</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <Card>
             <CardHeader>
               <div className="flex items-center mb-2">
                 <motion.div className="text-accent-500 mr-2" whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}>
-                  <div className="i-ph-file-text-duotone w-5 h-5" />
+                  <div className="i-ph:key-duotone w-5 h-5" />
                 </motion.div>
                 <CardTitle className="text-lg group-hover:text-bolt-elements-item-contentAccent transition-colors">
-                  Download Template
+                  Current configuration
                 </CardTitle>
               </div>
-              <CardDescription>Download a template file for your API keys.</CardDescription>
+              <CardDescription>Your selected model and stored API key (masked).</CardDescription>
             </CardHeader>
-            <CardFooter>
-              <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} className="w-full">
-                <Button
-                  onClick={handleDownloadTemplate}
-                  disabled={isDownloadingTemplate}
-                  variant="outline"
-                  size="sm"
-                  className={classNames(
-                    'hover:text-bolt-elements-item-contentAccent hover:border-bolt-elements-item-backgroundAccent hover:bg-bolt-elements-item-backgroundAccent transition-colors w-full justify-center',
-                    isDownloadingTemplate ? 'cursor-not-allowed' : '',
-                  )}
-                >
-                  {isDownloadingTemplate ? (
-                    <>
-                      <div className="i-ph-spinner-gap-bold animate-spin w-4 h-4 mr-2" />
-                      Downloading...
-                    </>
-                  ) : (
-                    'Download'
-                  )}
-                </Button>
-              </motion.div>
-            </CardFooter>
+            <CardContent>
+              <ApiKeysSummary />
+            </CardContent>
           </Card>
 
           <Card>

@@ -14,15 +14,21 @@ import {
 } from '~/lib/supabase/client';
 import { Dialog, DialogDescription, DialogRoot, DialogTitle } from '~/components/ui/Dialog';
 import { ThemeSwitch } from '~/components/ui/ThemeSwitch';
-import { TAB_LABELS, PRIMARY_INTEGRATION_TABS } from '~/components/@settings/core/constants';
+import { TAB_LABELS, TAB_DESCRIPTIONS, PRIMARY_INTEGRATION_TABS, DEFAULT_TAB_CONFIG } from '~/components/@settings/core/constants';
 import type { TabType } from '~/components/@settings/core/types';
 import { useVisibleUserTabs } from '~/components/@settings/core/useVisibleUserTabs';
 import { openSettingsTab } from '~/lib/stores/settings-modal';
+import { openSupportWhatsApp } from '~/utils/support';
 import { classNames } from '~/utils/classNames';
+import { Tooltip } from '~/components/ui/Tooltip';
 
 export function AuthBootstrap() {
   useEffect(() => {
-    void initSupabaseAuth();
+    void initSupabaseAuth().then(() => {
+      void import('~/lib/supabase/user-preferences').then(({ loadUserPreferenceDocument }) => {
+        void loadUserPreferenceDocument();
+      });
+    });
   }, []);
 
   return null;
@@ -33,16 +39,13 @@ const INTEGRATION_TAB_SET = new Set<TabType>(PRIMARY_INTEGRATION_TABS);
 const menuButtonClass =
   'flex w-full items-center gap-2 rounded-md border border-accent-500/50 bg-bolt-elements-background-depth-2 px-2.5 py-2 text-left text-sm text-bolt-elements-textPrimary hover:bg-accent-500/10';
 
-const subMenuButtonClass =
-  'flex w-full items-center gap-2 rounded-md border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2/80 px-2.5 py-1.5 text-left text-sm text-bolt-elements-textPrimary hover:bg-accent-500/10';
-
 const TAB_MENU_ICONS: Partial<Record<TabType, string>> = {
   profile: 'i-ph:user-circle',
   settings: 'i-ph:gear-six',
   notifications: 'i-ph:bell',
   features: 'i-ph:star',
   data: 'i-ph:database',
-  'cloud-providers': 'i-ph:cloud',
+  'cloud-providers': 'i-ph:sliders-horizontal',
   'local-providers': 'i-ph:laptop',
   github: 'i-ph:github-logo',
   gitlab: 'i-ph:gitlab-logo',
@@ -51,6 +54,7 @@ const TAB_MENU_ICONS: Partial<Record<TabType, string>> = {
   supabase: 'i-ph:database',
   'event-logs': 'i-ph:list-bullets',
   mcp: 'i-ph:wrench',
+  subscription: 'i-ph:receipt',
 };
 
 function getInitials(user: User): string {
@@ -90,6 +94,14 @@ function menuLabelForTab(tabId: TabType): string {
   return TAB_LABELS[tabId];
 }
 
+function MenuGlyph({ icon, tip }: { icon: string; tip: string }) {
+  return (
+    <Tooltip content={tip} delayDuration={250} side="left">
+      <span className={classNames(icon, 'h-4 w-4 shrink-0 text-accent-500')} />
+    </Tooltip>
+  );
+}
+
 function ProfileDetail({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-md border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 px-3 py-2.5">
@@ -111,23 +123,23 @@ export function AuthButton({ layout = 'sidebar' }: AuthButtonProps) {
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
-  const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
 
   const initials = useMemo(() => (user ? getInitials(user) : ''), [user]);
 
-  const { integrationTabs, otherTabs } = useMemo(() => {
-    const integration = visibleTabs.filter((tab) => INTEGRATION_TAB_SET.has(tab.id));
-    const other = visibleTabs.filter((tab) => !INTEGRATION_TAB_SET.has(tab.id));
+  const { modelSettingsTab, tabsBeforeIntegrations, tabsAfterIntegrations } = useMemo(() => {
+    const modelSettings = visibleTabs.find((tab) => tab.id === 'cloud-providers');
+    const other = visibleTabs.filter((tab) => !INTEGRATION_TAB_SET.has(tab.id) && tab.id !== 'cloud-providers');
+    const integrationsSlotOrder = DEFAULT_TAB_CONFIG.find((tab) => tab.id === 'local-providers')?.order ?? 8;
+    const before = other.filter((tab) => tab.order < integrationsSlotOrder);
+    const after = other.filter((tab) => tab.order >= integrationsSlotOrder);
 
-    return { integrationTabs: integration, otherTabs: other };
+    return {
+      modelSettingsTab: modelSettings,
+      tabsBeforeIntegrations: before,
+      tabsAfterIntegrations: after,
+    };
   }, [visibleTabs]);
-
-  useEffect(() => {
-    if (!menuOpen) {
-      setIntegrationsOpen(false);
-    }
-  }, [menuOpen]);
 
   if (!isSupabaseConfigured()) {
     return null;
@@ -204,20 +216,23 @@ export function AuthButton({ layout = 'sidebar' }: AuthButtonProps) {
     <>
       <div className={wrapperClass}>
         <Popover.Root open={menuOpen} onOpenChange={setMenuOpen}>
-          <Popover.Trigger asChild>
-            <button
-              type="button"
-              className={classNames(
-                'inline-flex h-9 w-9 items-center justify-center rounded-full text-sm font-semibold',
-                'bg-accent-500 text-white hover:bg-accent-600',
-                'focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40',
-              )}
-              aria-label="Open account menu"
-              title={user.email || 'Account'}
-            >
-              {initials}
-            </button>
-          </Popover.Trigger>
+          <Tooltip content={user.email || 'Account menu'} delayDuration={200}>
+            <span className="inline-flex">
+              <Popover.Trigger asChild>
+                <button
+                  type="button"
+                  className={classNames(
+                    'inline-flex h-9 w-9 items-center justify-center rounded-full text-sm font-semibold',
+                    'bg-accent-500 text-white hover:bg-accent-600',
+                    'focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40',
+                  )}
+                  aria-label="Open account menu"
+                >
+                  {initials}
+                </button>
+              </Popover.Trigger>
+            </span>
+          </Tooltip>
 
           <Popover.Portal>
             <Popover.Content
@@ -240,67 +255,73 @@ export function AuthButton({ layout = 'sidebar' }: AuthButtonProps) {
                 </div>
               </div>
 
-              <div className="max-h-[min(50vh,360px)] overflow-y-auto pt-2 space-y-1.5 modern-scrollbar">
+              <div className="max-h-[90vh] pt-2 space-y-1.5">
                 <button type="button" onClick={openAccount} className={menuButtonClass}>
-                  <span className="i-ph:user-circle h-4 w-4 shrink-0 text-accent-500" />
+                  <MenuGlyph icon="i-ph:user-circle" tip="Your profile and sign-in details" />
                   <span>Account</span>
                 </button>
 
-                {otherTabs.map((tab) => (
+                {modelSettingsTab && (
+                  <button type="button" onClick={() => openTab(modelSettingsTab.id)} className={menuButtonClass}>
+                    <MenuGlyph
+                      icon={TAB_MENU_ICONS[modelSettingsTab.id] || 'i-ph:sliders-horizontal'}
+                      tip={TAB_DESCRIPTIONS[modelSettingsTab.id]}
+                    />
+                    <span>{menuLabelForTab(modelSettingsTab.id)}</span>
+                  </button>
+                )}
+
+                <button type="button" onClick={() => openTab('subscription')} className={menuButtonClass}>
+                  <MenuGlyph icon="i-ph:receipt" tip={TAB_DESCRIPTIONS.subscription} />
+                  <span>Billing</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    openSupportWhatsApp();
+                  }}
+                  className={menuButtonClass}
+                >
+                  <MenuGlyph icon="i-ph:whatsapp-logo" tip="Chat with support on WhatsApp" />
+                  <span>Support</span>
+                </button>
+
+                {tabsBeforeIntegrations.map((tab) => (
                   <button key={tab.id} type="button" onClick={() => openTab(tab.id)} className={menuButtonClass}>
-                    <span
-                      className={classNames(
-                        TAB_MENU_ICONS[tab.id] || 'i-ph:gear-six',
-                        'h-4 w-4 shrink-0 text-accent-500',
-                      )}
+                    <MenuGlyph
+                      icon={TAB_MENU_ICONS[tab.id] || 'i-ph:gear-six'}
+                      tip={TAB_DESCRIPTIONS[tab.id]}
                     />
                     <span>{menuLabelForTab(tab.id)}</span>
                   </button>
                 ))}
 
-                {integrationTabs.length > 0 && (
-                  <div>
-                    <button
-                      type="button"
-                      onClick={() => setIntegrationsOpen((open) => !open)}
-                      className={menuButtonClass}
-                      aria-expanded={integrationsOpen}
-                    >
-                      <span className="i-ph:plugs-connected h-4 w-4 shrink-0 text-accent-500" />
-                      <span className="flex-1">Integrations</span>
-                      <span
-                        className={classNames(
-                          'h-3.5 w-3.5 shrink-0 text-bolt-elements-textTertiary transition-transform',
-                          integrationsOpen ? 'i-ph:caret-up' : 'i-ph:caret-down',
-                        )}
-                      />
-                    </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    openSettingsTab('integrations');
+                  }}
+                  className={menuButtonClass}
+                >
+                  <MenuGlyph icon="i-ph:plugs-connected" tip="Connect GitHub, GitLab, Netlify, Vercel, and Supabase" />
+                  <span>Integrations</span>
+                </button>
 
-                    {integrationsOpen && (
-                      <div className="mt-1.5 ml-2 space-y-1 border-l border-bolt-elements-borderColor pl-2">
-                        {integrationTabs.map((tab) => (
-                          <button
-                            key={tab.id}
-                            type="button"
-                            onClick={() => openTab(tab.id)}
-                            className={subMenuButtonClass}
-                          >
-                            <span
-                              className={classNames(
-                                TAB_MENU_ICONS[tab.id] || 'i-ph:gear-six',
-                                'h-3.5 w-3.5 shrink-0 text-accent-500',
-                              )}
-                            />
-                            <span>{TAB_LABELS[tab.id]}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
+                {tabsAfterIntegrations.map((tab) => (
+                  <button key={tab.id} type="button" onClick={() => openTab(tab.id)} className={menuButtonClass}>
+                    <MenuGlyph
+                      icon={TAB_MENU_ICONS[tab.id] || 'i-ph:gear-six'}
+                      tip={TAB_DESCRIPTIONS[tab.id]}
+                    />
+                    <span>{menuLabelForTab(tab.id)}</span>
+                  </button>
+                ))}
 
                 <button type="button" onClick={() => void handleSignOut()} className={menuButtonClass}>
-                  <span className="i-ph:sign-out h-4 w-4 shrink-0 text-accent-500" />
+                  <MenuGlyph icon="i-ph:sign-out" tip="Sign out of your account" />
                   <span>Sign out</span>
                 </button>
               </div>

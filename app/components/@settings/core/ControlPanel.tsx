@@ -27,9 +27,10 @@ import GitLabTab from '~/components/@settings/tabs/gitlab/GitLabTab';
 import SupabaseTab from '~/components/@settings/tabs/supabase/SupabaseTab';
 import VercelTab from '~/components/@settings/tabs/vercel/VercelTab';
 import NetlifyTab from '~/components/@settings/tabs/netlify/NetlifyTab';
-import CloudProvidersTab from '~/components/@settings/tabs/providers/cloud/CloudProvidersTab';
+import ModelSettingsTab from '~/components/@settings/tabs/model/ModelSettingsTab';
 import LocalProvidersTab from '~/components/@settings/tabs/providers/local/LocalProvidersTab';
 import McpTab from '~/components/@settings/tabs/mcp/McpTab';
+import SubscriptionTab from '~/components/@settings/tabs/subscription/SubscriptionTab';
 
 interface ControlPanelProps {
   open: boolean;
@@ -143,9 +144,11 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
 
   const primaryTabs = useMemo(
     () =>
-      visibleTabs
-        .filter((tab) => PRIMARY_TAB_SET.has(tab.id))
-        .sort((a, b) => PRIMARY_INTEGRATION_TABS.indexOf(a.id) - PRIMARY_INTEGRATION_TABS.indexOf(b.id)),
+      PRIMARY_INTEGRATION_TABS.map((id, index) => {
+        const existing = visibleTabs.find((tab) => tab.id === id);
+
+        return existing ?? { id, visible: true, window: 'user' as const, order: index };
+      }),
     [visibleTabs],
   );
 
@@ -200,7 +203,7 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
       case 'data':
         return <DataTab />;
       case 'cloud-providers':
-        return <CloudProvidersTab />;
+        return <ModelSettingsTab />;
       case 'local-providers':
         return <LocalProvidersTab />;
       case 'github':
@@ -217,6 +220,8 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
         return <EventLogsTab />;
       case 'mcp':
         return <McpTab />;
+      case 'subscription':
+        return <SubscriptionTab />;
 
       default:
         return null;

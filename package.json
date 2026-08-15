@@ -29,6 +29,8 @@
     "typegen": "wrangler types",
     "runtime:daemon": "node runtime-daemon/src/server.mjs",
     "runtime:daemon:dev": "node --watch runtime-daemon/src/server.mjs",
+    "docker:daemon": "node runtime-daemon/src/server.mjs",
+    "docker:daemon:dev": "node --watch runtime-daemon/src/server.mjs",
     "preview": "pnpm run build && pnpm run start",
     "prepare": "husky",
     "clean": "node scripts/clean.js",

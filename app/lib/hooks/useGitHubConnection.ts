@@ -50,11 +50,6 @@ export function useGitHubConnection(): UseGitHubConnectionReturn {
         return;
       }
 
-      // If we have a token but no user, or incomplete data, refresh
-      if (connection?.token && (!connection.user || !connection.stats)) {
-        await refreshConnectionData(connection);
-      }
-
       setIsLoading(false);
     } catch (error) {
       console.error('Error loading saved connection:', error);

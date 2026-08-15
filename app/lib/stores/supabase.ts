@@ -86,10 +86,6 @@ export const isConnecting = atom(false);
 export const isFetchingStats = atom(false);
 export const isFetchingApiKeys = atom(false);
 
-if (initialState.token && !initialState.stats) {
-  fetchSupabaseStats(initialState.token).catch(console.error);
-}
-
 export function updateSupabaseConnection(connection: Partial<SupabaseConnectionState>) {
   const currentState = supabaseConnection.get();
 
@@ -141,16 +137,14 @@ export function updateSupabaseConnection(connection: Partial<SupabaseConnectionS
     storage?.removeItem('supabase_connection');
     storage?.removeItem('supabaseCredentials');
   }
+
+  void import('~/lib/supabase/user-integrations').then(({ schedulePersistIntegrations }) => {
+    schedulePersistIntegrations();
+  });
 }
 
 export function initializeSupabaseConnection() {
-  // Auto-connect using environment variable if available
-  const envToken = import.meta.env?.VITE_SUPABASE_ACCESS_TOKEN;
-
-  if (envToken && !supabaseConnection.get().token) {
-    updateSupabaseConnection({ token: envToken });
-    fetchSupabaseStats(envToken).catch(console.error);
-  }
+  // Users connect with a personal token. Do not call Supabase with env tokens.
 }
 
 export async function fetchSupabaseStats(token: string) {

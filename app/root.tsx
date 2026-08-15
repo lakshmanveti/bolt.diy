@@ -13,6 +13,7 @@ import { cssTransition, ToastContainer } from 'react-toastify';
 import { AuthBootstrap } from '~/components/auth/AuthButton';
 import { SettingsTabModal } from '~/components/@settings/core/SettingsTabModal';
 import { AuthGate } from '~/components/auth/AuthGate.client';
+import { SubscriptionGate } from '~/components/billing/SubscriptionGate.client';
 import { AuthLoadingScreen } from '~/components/auth/AuthLoadingScreen';
 import { RuntimeHealthPoller } from '~/components/runtime/RuntimeHealthPoller.client';
 
@@ -95,7 +96,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
             <RuntimeHealthPoller />
             <AuthBootstrap />
             <SettingsTabModal />
-            <AuthGate>{children}</AuthGate>
+            <AuthGate>
+              <SubscriptionGate>{children}</SubscriptionGate>
+            </AuthGate>
           </DndProvider>
         )}
       </ClientOnly>
