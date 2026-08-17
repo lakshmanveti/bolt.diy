@@ -10,6 +10,7 @@ import { BuildLiveLogo } from '~/components/ui/BuildLiveLogo';
 import { openSidebar } from '~/lib/stores/sidebar';
 import { AuthButton } from '~/components/auth/AuthButton';
 import { ChatDescription } from '~/lib/persistence/ChatDescription.client';
+import { onNewAppClick } from '~/lib/persistence/live-chat-session';
 import { getApiKeysFromCookies } from '~/components/chat/APIKeyManager';
 import { fetchModelList, invalidateModelList } from '~/lib/modules/llm/fetch-models';
 import Cookies from 'js-cookie';
@@ -17,7 +18,6 @@ import { ChatBox } from '~/components/chat/ChatBox';
 import { UserLlmPreferencesSetup } from '~/components/auth/UserLlmPreferencesSetup';
 import { isSupabaseConfigured } from '~/lib/supabase/client';
 import { userPreferencesStore } from '~/lib/supabase/user-preferences';
-import ChatAlert from '~/components/chat/ChatAlert';
 import { SupabaseChatAlert } from '~/components/chat/SupabaseAlert';
 import DeployChatAlert from '~/components/deploy/DeployAlert';
 import LlmErrorAlert from '~/components/chat/LLMApiAlert';
@@ -116,8 +116,6 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
       imageDataList = [],
       setImageDataList,
       messages,
-      actionAlert,
-      clearAlert,
       deployAlert,
       clearDeployAlert,
       supabaseAlert,
@@ -422,7 +420,7 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
 
     const composer = (
       <div className="flex flex-col gap-2 w-full">
-        {(actionAlert || supabaseAlert || deployAlert || llmErrorAlert) && (
+        {(supabaseAlert || deployAlert || llmErrorAlert) && (
           <div className="flex flex-col gap-2">
             {deployAlert && (
               <DeployChatAlert
@@ -441,16 +439,6 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
                 postMessage={(message) => {
                   sendMessage?.({} as any, message);
                   clearSupabaseAlert?.();
-                }}
-              />
-            )}
-            {actionAlert && (
-              <ChatAlert
-                alert={actionAlert}
-                clearAlert={() => clearAlert?.()}
-                postMessage={(message) => {
-                  sendMessage?.({} as any, message);
-                  clearAlert?.();
                 }}
               />
             )}
@@ -593,6 +581,7 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
                 href="/"
                 className="inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-bolt-elements-textSecondary hover:bg-bolt-elements-background-depth-2"
                 title="New app"
+                onClick={onNewAppClick}
               >
                 <span className="i-ph:plus h-3.5 w-3.5" />
                 New

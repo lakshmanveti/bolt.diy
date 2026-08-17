@@ -6,18 +6,6 @@ import { APP_NAME } from '~/utils/brand';
  */
 export const SHOW_BUILD_ENGAGEMENT = true;
 
-/** Shown while reopening an existing chat — not a full generate. */
-export const SESSION_RESTORE_MESSAGES = [
-  'Waking up the app you already built…',
-  'No full rebuild — just reconnecting the live preview.',
-  'Picking up right where you left off.',
-  'Your last generation is still here. Plugging it back in.',
-  'Restoring the canvas, not starting from scratch.',
-  'Chat on the right. Preview coming back on the left.',
-  'Reattaching the running app to this session…',
-  'Almost there — live preview incoming.',
-] as const;
-
 export const BUILD_WAIT_TIPS = [
   `After this finishes, say what to change — ${APP_NAME} will update the live app.`,
   'Use Ask mode to explore ideas without rebuilding.',

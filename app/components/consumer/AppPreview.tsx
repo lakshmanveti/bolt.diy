@@ -3,7 +3,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ButtonHTM
 import { toast } from 'react-toastify';
 import type { ProgressAnnotation } from '~/types/context';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { dockerPreviewBusy, dockerPreviewReloadToken } from '~/lib/runtime';
+import { dockerPreviewBusy, dockerPreviewReloadToken, dockerStartStatus } from '~/lib/runtime';
 import { previewHealthStore } from '~/lib/stores/preview-health';
 import { retryPreviewRecovery } from '~/lib/stores/previews';
 import { classNames } from '~/utils/classNames';
@@ -13,6 +13,9 @@ import { ConsumerDeployButton } from './ConsumerDeployButton';
 import { copyPreviewLink, LivePreviewBar, LivePreviewOverlay, useLivePreviewUi } from './LivePreviewBar';
 import { BuildLiveLogo } from '~/components/ui/BuildLiveLogo';
 import { Tooltip } from '~/components/ui/Tooltip';
+import { formatElapsed } from '~/lib/consumer/buildEngagement';
+import { onNewAppClick } from '~/lib/persistence/live-chat-session';
+import { SHOW_DOCKER_START_STATUS } from '~/utils/constants';
 
 /**
  * Prefer direct Docker host ports over /embed proxies.
@@ -130,9 +133,7 @@ function PreviewToolbar({
             href="/"
             className={iconBtn(true)}
             aria-label="New app"
-            onClick={() => {
-              void import('~/lib/persistence').then(({ clearLiveChatSession }) => clearLiveChatSession());
-            }}
+            onClick={onNewAppClick}
           >
             <div className="i-ph:plus w-4 h-4" />
           </a>
@@ -290,6 +291,7 @@ export const AppPreview = memo(
     const previewHealth = useStore(previewHealthStore);
     const reloadToken = useStore(dockerPreviewReloadToken);
     const previewBusy = useStore(dockerPreviewBusy);
+    const startStatus = useStore(dockerStartStatus);
     const iframeRef = useRef<HTMLIFrameElement>(null);
     const [previewBust, setPreviewBust] = useState(() => Date.now());
     const hasSelectedPreview = useRef(false);
@@ -299,6 +301,21 @@ export const AppPreview = memo(
     const [mobileView, setMobileView] = useState(false);
     const [landscape, setLandscape] = useState(false);
     const [inspectorMode, setInspectorMode] = useState(false);
+    const [startElapsed, setStartElapsed] = useState(0);
+
+    useEffect(() => {
+      if (!previewBusy) {
+        setStartElapsed(0);
+        return undefined;
+      }
+
+      const started = startStatus.startedAt || Date.now();
+      const tick = () => setStartElapsed(Math.max(0, Math.floor((Date.now() - started) / 1000)));
+      tick();
+      const id = window.setInterval(tick, 1000);
+
+      return () => window.clearInterval(id);
+    }, [previewBusy, startStatus.startedAt]);
 
     const readyPreviews = useMemo(
       () => previews.filter((preview) => preview.ready && Boolean(preview.baseUrl)),
@@ -492,19 +509,23 @@ export const AppPreview = memo(
                 )}
                 <p className="text-sm font-medium text-bolt-elements-textPrimary">
                   {previewBusy
-                    ? 'Updating preview…'
+                    ? (SHOW_DOCKER_START_STATUS && startStatus.title) || 'Starting your app…'
                     : previewHealth.status === 'recovering'
                       ? 'Fixing preview…'
                       : 'Preview not responding'}
                 </p>
                 <p className="mt-1 text-xs text-bolt-elements-textSecondary">
                   {previewBusy
-                    ? 'Restarting the app so your latest changes show up.'
+                    ? (SHOW_DOCKER_START_STATUS && startStatus.detail) ||
+                      'Preparing the live preview in Docker.'
                     : previewHealth.message ||
                       (previewHealth.status === 'recovering'
                         ? 'Restarting the app server in Docker.'
                         : 'The preview URL did not return a valid page.')}
                 </p>
+                {previewBusy && startElapsed > 0 ? (
+                  <p className="mt-2 text-xs text-bolt-elements-textTertiary">{formatElapsed(startElapsed)}</p>
+                ) : null}
                 {previewHealth.status === 'unreachable' && !previewBusy && (
                   <button
                     type="button"

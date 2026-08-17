@@ -18,6 +18,12 @@ export const TOOL_NO_EXECUTE_FUNCTION = 'Error: No execute function found on too
 export const TOOL_EXECUTION_DENIED = 'Error: User denied access to tool execution';
 export const TOOL_EXECUTION_ERROR = 'Error: An error occured while calling tool';
 
+/**
+ * Show live Docker start stages (installing packages, starting Vite) on the
+ * generate overlay and when reopening an existing chat. Set to false to hide.
+ */
+export const SHOW_DOCKER_START_STATUS = true;
+
 const llmManager = LLMManager.getInstance(import.meta.env);
 
 export const PROVIDER_LIST = llmManager.getAllProviders();

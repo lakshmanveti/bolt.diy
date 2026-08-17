@@ -4,6 +4,7 @@ import { mkdir, writeFile, rm, access, readdir, copyFile, readFile } from 'node:
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { parseStartLog, withInstallProgress } from './start-status.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -28,6 +29,7 @@ const SESSION_META_FILENAME = '.buildlive-session.json';
  *  preview?: { port: number, hostPort: number, url: string, ready: boolean },
  *  lastCommand?: string,
  *  startProcess?: import('node:child_process').ChildProcessWithoutNullStreams,
+ *  startStatus?: { stage: string, packageName?: string, packagesAdded?: number, error?: string, startedAt?: number, logLength?: number },
  * }} Session */
 
 /** @type {Map<string, Session>} */
@@ -116,7 +118,7 @@ async function pruneStaleContainers() {
     .filter(Boolean);
 
   for (const id of ids) {
-    await run('docker', ['rm', '-f', id]);
+    await run('docker', ['rm', '-f', id], { timeoutMs: 20_000 });
   }
 
   if (ids.length) {
@@ -155,15 +157,37 @@ async function readBody(req) {
 }
 
 function run(command, args, options = {}) {
+  const { timeoutMs = 45_000, ...spawnOptions } = options;
+
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       shell: false,
       windowsHide: true,
-      ...options,
+      ...spawnOptions,
     });
 
     let stdout = '';
     let stderr = '';
+    let settled = false;
+
+    const finish = (payload) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timer);
+      resolve(payload);
+    };
+
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish({
+        exitCode: 1,
+        stdout,
+        stderr: stderr || `Timed out after ${timeoutMs}ms: ${command} ${args.join(' ')}`,
+      });
+    }, timeoutMs);
 
     child.stdout?.on('data', (d) => {
       stdout += d.toString();
@@ -173,13 +197,66 @@ function run(command, args, options = {}) {
     });
 
     child.on('error', (err) => {
-      resolve({ exitCode: 1, stdout, stderr: stderr || err.message });
+      finish({ exitCode: 1, stdout, stderr: stderr || err.message });
     });
 
     child.on('close', (code) => {
-      resolve({ exitCode: code ?? 1, stdout, stderr });
+      finish({ exitCode: code ?? 1, stdout, stderr });
     });
   });
+}
+
+/** Serialize work that must not overlap (same session / same container name). */
+const locks = new Map();
+
+function withLock(key, fn) {
+  const previous = locks.get(key) || Promise.resolve();
+  const next = previous.then(fn, fn);
+  locks.set(
+    key,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return next;
+}
+
+async function inspectContainer(nameOrId) {
+  const result = await run('docker', ['inspect', '-f', '{{.Id}} {{.State.Running}} {{.State.Status}}', nameOrId], {
+    timeoutMs: 15_000,
+  });
+
+  if (result.exitCode !== 0) {
+    return null;
+  }
+
+  const [id, running, status] = result.stdout.trim().split(/\s+/);
+
+  if (!id) {
+    return null;
+  }
+
+  return { id, running: running === 'true', status: status || '' };
+}
+
+async function adoptContainer(session, nameOrId) {
+  const info = await inspectContainer(nameOrId);
+
+  if (!info) {
+    return null;
+  }
+
+  if (!info.running) {
+    const started = await run('docker', ['start', info.id], { timeoutMs: 30_000 });
+
+    if (started.exitCode !== 0) {
+      return null;
+    }
+  }
+
+  session.containerId = info.id;
+  return { ...info, running: true };
 }
 
 let dockerStatusCache = { checkedAt: 0, available: false };
@@ -207,7 +284,7 @@ async function ensureImage() {
     return;
   }
   console.log(`[runtime-daemon] Pulling ${IMAGE}...`);
-  const pull = await run('docker', ['pull', IMAGE]);
+  const pull = await run('docker', ['pull', IMAGE], { timeoutMs: 300_000 });
   if (pull.exitCode !== 0) {
     throw new Error(`Failed to pull ${IMAGE}: ${pull.stderr || pull.stdout}`);
   }
@@ -219,47 +296,71 @@ function toContainerPath(relPath) {
 }
 
 async function ensureSessionContainer(session) {
-  if (session.containerId) {
-    const running = await run('docker', ['inspect', '-f', '{{.State.Running}}', session.containerId]);
-    if (running.exitCode === 0 && running.stdout.trim() === 'true') {
+  return withLock(`container:${session.containerName}`, async () => {
+    const current = session.containerId ? await adoptContainer(session, session.containerId) : null;
+
+    if (current) {
       return;
     }
-  }
 
-  await ensureImage();
+    const byName = await adoptContainer(session, session.containerName);
 
-  // Clean leftover container with same name
-  await run('docker', ['rm', '-f', session.containerName]);
+    if (byName) {
+      console.log(
+        `[runtime-daemon] Session ${session.id} reused container ${session.containerId.slice(0, 12)}`,
+      );
+      return;
+    }
 
-  const portArgs = PREVIEW_PORTS.flatMap((p) => ['-p', `127.0.0.1::${p}`]);
+    await ensureImage();
+    setStartStatus(session, { stage: 'container', startedAt: Date.now() });
 
-  const create = await run('docker', [
-    'run',
-    '-d',
-    '--name',
-    session.containerName,
-    // Docker Desktop 20.x default seccomp blocks Node/libuv thread creation
-    '--security-opt',
-    'seccomp=unconfined',
-    '-w',
-    CONTAINER_WORKDIR,
-    '-v',
-    `${session.workdir}:${CONTAINER_WORKDIR}`,
-    ...portArgs,
-    IMAGE,
-    'sleep',
-    'infinity',
-  ]);
+    const portArgs = PREVIEW_PORTS.flatMap((p) => ['-p', `127.0.0.1::${p}`]);
+    const create = await run(
+      'docker',
+      [
+        'run',
+        '-d',
+        '--name',
+        session.containerName,
+        '--security-opt',
+        'seccomp=unconfined',
+        '-w',
+        CONTAINER_WORKDIR,
+        '-v',
+        `${session.workdir}:${CONTAINER_WORKDIR}`,
+        ...portArgs,
+        IMAGE,
+        'sleep',
+        'infinity',
+      ],
+      { timeoutMs: 60_000 },
+    );
 
-  if (create.exitCode !== 0) {
+    if (create.exitCode === 0) {
+      session.containerId = create.stdout.trim();
+      console.log(`[runtime-daemon] Session ${session.id} container ${session.containerId.slice(0, 12)}`);
+      return;
+    }
+
+    const conflict = /already in use/i.test(`${create.stderr}${create.stdout}`);
+
+    if (conflict) {
+      const reused = await adoptContainer(session, session.containerName);
+
+      if (reused) {
+        console.log(
+          `[runtime-daemon] Session ${session.id} adopted in-use container ${session.containerId.slice(0, 12)}`,
+        );
+        return;
+      }
+    }
+
     throw new Error(`Failed to start container: ${create.stderr || create.stdout}`);
-  }
-
-  session.containerId = create.stdout.trim();
-  console.log(`[runtime-daemon] Session ${session.id} container ${session.containerId.slice(0, 12)}`);
+  });
 }
 
-async function dockerExec(session, command, { detach = false } = {}) {
+async function dockerExec(session, command, { detach = false, timeoutMs } = {}) {
   await ensureSessionContainer(session);
 
   const args = ['exec'];
@@ -268,7 +369,7 @@ async function dockerExec(session, command, { detach = false } = {}) {
   }
   args.push(session.containerId, 'bash', '-lc', command);
 
-  return run('docker', args);
+  return run('docker', args, timeoutMs ? { timeoutMs } : {});
 }
 
 async function resolvePreview(session) {
@@ -778,24 +879,74 @@ async function chooseFallbackStart(session) {
   return null;
 }
 
+function setStartStatus(session, patch) {
+  const previous = session.startStatus || {};
+  session.startStatus = {
+    stage: 'idle',
+    startedAt: previous.startedAt || Date.now(),
+    ...previous,
+    ...patch,
+    updatedAt: Date.now(),
+  };
+}
+
+async function refreshStartStatusFromLog(session) {
+  const log = await readStartLog(session);
+  const parsed = parseStartLog(log);
+
+  if (parsed.logLength === 0 && session.startStatus?.stage) {
+    return session.startStatus;
+  }
+
+  setStartStatus(session, {
+    stage: parsed.stage,
+    packageName: parsed.packageName,
+    packagesAdded: parsed.packagesAdded,
+    error: parsed.error,
+    logLength: parsed.logLength,
+  });
+
+  return session.startStatus;
+}
+
 async function startCommand(session, command) {
   const wrapped = `nohup bash -lc ${JSON.stringify(command)} > /tmp/buildlive-start.log 2>&1 &`;
   return dockerExec(session, wrapped, { detach: false });
 }
 
 async function readStartLog(session) {
-  const result = await dockerExec(session, 'tail -n 80 /tmp/buildlive-start.log 2>/dev/null || true');
+  const result = await dockerExec(session, 'tail -n 120 /tmp/buildlive-start.log 2>/dev/null || true', {
+    timeoutMs: 12_000,
+  });
   return (result.stdout || '').trim();
 }
 
 async function waitForPreview(session, attempts = 30, delayMs = 700) {
   let preview = null;
+  let lastLogLength = 0;
+  let idleRounds = 0;
+  const hardMax = Math.max(attempts, 720);
 
   for (let i = 0; i < attempts; i++) {
     await new Promise((r) => setTimeout(r, delayMs));
+    const status = await refreshStartStatusFromLog(session);
+    const logLength = status?.logLength || 0;
+
+    if (logLength > lastLogLength) {
+      lastLogLength = logLength;
+      idleRounds = 0;
+    } else {
+      idleRounds += 1;
+    }
+
     preview = await resolvePreview(session);
     if (preview?.ready) {
+      setStartStatus(session, { stage: 'ready', error: null });
       return preview;
+    }
+
+    if (status?.stage === 'install' && idleRounds < 25 && i >= attempts - 2 && attempts < hardMax) {
+      attempts += 1;
     }
   }
 
@@ -827,6 +978,7 @@ async function restartSession(session) {
   }
 
   await stopAppProcesses(session);
+  setStartStatus(session, { stage: 'server', startedAt: Date.now(), error: null });
   // Flush host bind-mount writes into the container before Node boots
   await dockerExec(session, 'sync || true');
   await startCommand(session, command);
@@ -844,48 +996,51 @@ async function restartSession(session) {
 
 async function createSession(chatId) {
   const id = sanitizeSessionId(chatId);
-  const existingId = sessionsByChatId.get(chatId) || (sessions.has(id) ? id : null);
 
-  if (existingId && sessions.has(existingId)) {
-    const existing = sessions.get(existingId);
-    await ensureSessionContainer(existing);
-    return existing;
-  }
+  return withLock(`session:${id}`, async () => {
+    const existingId = sessionsByChatId.get(chatId) || (sessions.has(id) ? id : null);
 
-  // Resume from an on-disk workdir created in a previous daemon process
-  const workdir = path.join(SESSIONS_DIR, id);
-  try {
-    await access(workdir);
+    if (existingId && sessions.has(existingId)) {
+      const existing = sessions.get(existingId);
+      await ensureSessionContainer(existing);
+      return existing;
+    }
+
+    // Resume from an on-disk workdir created in a previous daemon process
+    const workdir = path.join(SESSIONS_DIR, id);
+    try {
+      await access(workdir);
+      /** @type {Session} */
+      const revived = {
+        id,
+        chatId: chatId || id,
+        workdir,
+        containerName: containerNameFor(id),
+      };
+      registerSession(revived);
+      await writeSessionMeta(revived);
+      await ensureSessionContainer(revived);
+      console.log(`[runtime-daemon] resumed session ${id} from disk`);
+      return revived;
+    } catch {
+      // create fresh
+    }
+
+    await mkdir(workdir, { recursive: true });
+
     /** @type {Session} */
-    const revived = {
+    const session = {
       id,
       chatId: chatId || id,
       workdir,
       containerName: containerNameFor(id),
     };
-    registerSession(revived);
-    await writeSessionMeta(revived);
-    await ensureSessionContainer(revived);
-    console.log(`[runtime-daemon] resumed session ${id} from disk`);
-    return revived;
-  } catch {
-    // create fresh
-  }
 
-  await mkdir(workdir, { recursive: true });
-
-  /** @type {Session} */
-  const session = {
-    id,
-    chatId: chatId || id,
-    workdir,
-    containerName: containerNameFor(id),
-  };
-
-  registerSession(session);
-  await writeSessionMeta(session);
-  await ensureSessionContainer(session);
-  return session;
+    registerSession(session);
+    await writeSessionMeta(session);
+    await ensureSessionContainer(session);
+    return session;
+  });
 }
 
 async function destroySession(session) {
@@ -929,10 +1084,20 @@ async function softStartSession(session) {
     return { command: null, preview: null };
   }
 
+  command = withInstallProgress(command);
+  const needsInstall = /\bnpm install\b/.test(command);
+  setStartStatus(session, {
+    stage: needsInstall ? 'install' : 'server',
+    packageName: null,
+    packagesAdded: null,
+    error: null,
+    startedAt: Date.now(),
+  });
+
   await stopAppProcesses(session);
   await startCommand(session, command);
   session.lastCommand = command;
-  const waitAttempts = /npm install|vite/.test(command) ? 90 : 20;
+  const waitAttempts = needsInstall ? 480 : /vite/.test(command) ? 90 : 20;
   const preview = await waitForPreview(session, waitAttempts, 1000);
   return { command, preview };
 }
@@ -941,6 +1106,7 @@ async function softStartSession(session) {
  * Attach to an existing project: return live preview if up, otherwise soft-start.
  */
 async function resumeSession(session) {
+  setStartStatus(session, { stage: 'container', startedAt: Date.now(), error: null });
   await ensureSessionContainer(session);
 
   const hasNodeModules = await pathExistsInSession(session, 'node_modules');
@@ -952,6 +1118,7 @@ async function resumeSession(session) {
   let preview = await resolvePreview(session);
 
   if (preview?.ready) {
+    setStartStatus(session, { stage: 'ready', error: null });
     return {
       resumed: true,
       softStarted: false,
@@ -1136,7 +1303,9 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const sessionMatch = pathname.match(/^\/sessions\/([^/]+)(?:\/(files|exec|start|preview|resume|restart))?$/);
+    const sessionMatch = pathname.match(
+      /^\/sessions\/([^/]+)(?:\/(files|exec|start-status|start|preview|resume|restart))?$/,
+    );
     if (!sessionMatch) {
       notFound(res);
       return;
@@ -1154,6 +1323,12 @@ const server = createServer(async (req, res) => {
     if (req.method === 'DELETE' && !action) {
       await destroySession(session);
       json(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.method === 'GET' && action === 'start-status') {
+      await refreshStartStatusFromLog(session).catch(() => undefined);
+      json(res, 200, session.startStatus || { stage: 'idle' });
       return;
     }
 
@@ -1248,6 +1423,16 @@ const server = createServer(async (req, res) => {
 
       await stopAppProcesses(session);
 
+      command = withInstallProgress(command);
+      const needsInstall = /\bnpm install\b/.test(command);
+      setStartStatus(session, {
+        stage: needsInstall ? 'install' : 'server',
+        packageName: null,
+        packagesAdded: null,
+        error: null,
+        startedAt: Date.now(),
+      });
+
       console.log(`[runtime-daemon] start session=${session.id} cmd=${command}`);
       let result = await startCommand(session, command);
       if (result.exitCode !== 0) {
@@ -1258,8 +1443,8 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      // npm install + vite can take a while on first run
-      const waitAttempts = /npm install|vite/.test(command) ? 90 : 20;
+      // First npm install on Windows Docker is often several minutes.
+      const waitAttempts = needsInstall ? 480 : /vite/.test(command) ? 90 : 20;
       let preview = await waitForPreview(session, waitAttempts, 1000);
 
       // Failed start: try an alternate runner (e.g. static → vite or npm → static)
@@ -1268,15 +1453,20 @@ const server = createServer(async (req, res) => {
         if (fallback && fallback !== command) {
           console.log(`[runtime-daemon] fallback start session=${session.id} cmd=${fallback}`);
           await stopAppProcesses(session);
-          await startCommand(session, fallback);
-          command = fallback;
-          const fallbackAttempts = /npm install|vite/.test(fallback) ? 90 : 20;
+          await startCommand(session, withInstallProgress(fallback));
+          command = withInstallProgress(fallback);
+          const fallbackAttempts = /\bnpm install\b/.test(command) ? 480 : /vite/.test(command) ? 90 : 20;
           preview = await waitForPreview(session, fallbackAttempts, 1000);
         }
       }
 
       if (!preview?.ready) {
         const log = await readStartLog(session);
+        const parsed = parseStartLog(log);
+        setStartStatus(session, {
+          stage: 'error',
+          error: parsed.error || 'The preview server did not become ready.',
+        });
         json(res, 500, {
           error: 'Preview server did not become ready',
           command,

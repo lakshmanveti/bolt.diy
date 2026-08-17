@@ -47,6 +47,23 @@ function withoutSyntheticSnapshotMessages(messages: Message[]): Message[] {
   return messages.filter((message) => !isSyntheticSnapshotMessage(message));
 }
 
+async function waitForDockerRuntime(
+  runtime: ReturnType<typeof getDockerRuntime>,
+  timeoutMs: number,
+): Promise<boolean> {
+  const started = Date.now();
+
+  while (Date.now() - started < timeoutMs) {
+    if (await runtime.checkHealth({ strict: true })) {
+      return true;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+
+  return runtime.checkHealth({ strict: true });
+}
+
 export interface ChatHistoryItem {
   id: string;
   urlId?: string;
@@ -70,7 +87,7 @@ export function useChatHistory() {
   const authReady = useStore(authReadyStore);
   const authUser = useStore(authUserStore);
 
-  const recovered = recoverLiveChatSession(mixedId);
+  const recovered = mixedId ? recoverLiveChatSession(mixedId) : undefined;
   const [archivedMessages, setArchivedMessages] = useState<Message[]>([]);
   const [initialMessages, setInitialMessages] = useState<Message[]>(
     () => withoutSyntheticSnapshotMessages(recovered?.messages ?? []),
@@ -145,20 +162,27 @@ export function useChatHistory() {
               restoreSnapshot(mixedId, validSnapshot);
             }
 
-            if (getEffectiveExecutionTarget() === 'docker' && isDockerRuntimeAvailable()) {
+            if (getEffectiveExecutionTarget() === 'docker') {
               try {
                 chatId.set(storedMessages.id);
                 const runtime = getDockerRuntime();
-                const resume = await runtime.resume(storedMessages.id);
+                const daemonReady =
+                  isDockerRuntimeAvailable() || (await waitForDockerRuntime(runtime, 60_000));
 
-                if (resume.hasFiles) {
-                  runtime.setHydrateSkipWrites(true);
-                } else {
-                  for (const [filePath, value] of Object.entries(validSnapshot.files || {})) {
-                    if (value?.type === 'file' && typeof value.content === 'string') {
-                      await runtime.writeFile(filePath.replace(/^\/home\/project\//, ''), value.content);
+                if (daemonReady) {
+                  const resume = await runtime.resume(storedMessages.id);
+
+                  if (resume.hasFiles) {
+                    runtime.setHydrateSkipWrites(true);
+                  } else {
+                    for (const [filePath, value] of Object.entries(validSnapshot.files || {})) {
+                      if (value?.type === 'file' && typeof value.content === 'string') {
+                        await runtime.writeFile(filePath.replace(/^\/home\/project\//, ''), value.content);
+                      }
                     }
                   }
+                } else {
+                  console.warn('[ChatHistory] Runtime daemon did not become ready in time');
                 }
               } catch (error) {
                 console.warn('[ChatHistory] Docker resume failed', error);

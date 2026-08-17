@@ -42,14 +42,17 @@ export function labelForFilePath(filePath: string): string {
   return 'Adding a new piece of the app';
 }
 
+const INSTALL_CMD = /npm\s+i(nstall)?|pnpm\s+i(nstall)?|yarn\s+(add|install)|bun\s+i(nstall)?/;
+const DEV_CMD = /npm\s+run\s+dev|pnpm\s+dev|yarn\s+dev|bun\s+dev|vite|next\s+dev/;
+
 export function labelForShell(content: string): string {
   const cmd = content.trim().toLowerCase();
 
-  if (/npm\s+i(nstall)?|pnpm\s+i(nstall)?|yarn\s+(add|install)|bun\s+i(nstall)?/.test(cmd)) {
+  if (INSTALL_CMD.test(cmd)) {
     return 'Installing packages';
   }
 
-  if (/npm\s+run\s+dev|pnpm\s+dev|yarn\s+dev|bun\s+dev|vite|next\s+dev/.test(cmd)) {
+  if (DEV_CMD.test(cmd)) {
     return 'Starting your app';
   }
 
@@ -79,6 +82,24 @@ export function labelForAction(action: ActionState): string {
     default:
       return 'Working on your app';
   }
+}
+
+/**
+ * Install / dev-server actions are reported by the Docker daemon.
+ * Do not also show them as Bolt step labels on the live preview.
+ */
+export function isDockerCoveredAction(action: Pick<ActionState, 'type'> & { content?: string }): boolean {
+  if (action.type === 'start') {
+    return true;
+  }
+
+  if (action.type !== 'shell') {
+    return false;
+  }
+
+  const cmd = (action.content || '').trim().toLowerCase();
+
+  return INSTALL_CMD.test(cmd) || DEV_CMD.test(cmd);
 }
 
 export function statusLabel(status: ActionState['status']): string {

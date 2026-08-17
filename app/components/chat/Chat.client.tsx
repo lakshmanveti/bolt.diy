@@ -37,6 +37,12 @@ import type { ProviderInfo } from '~/types/model';
 import { useLoaderData, useSearchParams } from '@remix-run/react';
 import { createSampler } from '~/utils/sampler';
 import { getTemplates, selectStarterTemplate } from '~/utils/selectStarterTemplate';
+import {
+  clearPendingAppTemplate,
+  setPendingAppTemplateFromIntent,
+  tryApplyCuratedStarter,
+  useSaveAppTemplateOnPreview,
+} from '~/lib/app-starters';
 import { logStore } from '~/lib/stores/logs';
 import { streamingState } from '~/lib/stores/streaming';
 import { filesToArtifacts } from '~/utils/fileUtils';
@@ -142,6 +148,13 @@ export const ChatImpl = memo(
         workbenchStore.setReloadedMessages(initialMessages.map((message) => message.id));
       }
       // Only on mount — mid-generate updates must not mark actions as already replayed.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    useEffect(() => {
+      if (initialMessages.length > 0) {
+        clearPendingAppTemplate();
+      }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
     const files = useStore(workbenchStore.files);
@@ -451,8 +464,10 @@ export const ChatImpl = memo(
       wasStreamingRef.current = isLoading;
     }, [isLoading, fakeLoading]);
 
+    useSaveAppTemplateOnPreview({ isLoading, fakeLoading });
+
     useEffect(() => {
-      if (!interrupted || isLoading || fakeLoading) {
+      if (uiMode !== 'studio' || !interrupted || isLoading || fakeLoading) {
         return;
       }
 
@@ -462,7 +477,7 @@ export const ChatImpl = memo(
         description: 'Your chat is still here. Retry to continue building the app.',
         errorType: 'network',
       });
-    }, [interrupted, isLoading, fakeLoading]);
+    }, [interrupted, isLoading, fakeLoading, uiMode]);
 
     const retryGeneration = useCallback(() => {
       setLlmErrorAlert(undefined);
@@ -703,6 +718,10 @@ export const ChatImpl = memo(
         return;
       }
 
+      if (chatStarted) {
+        clearPendingAppTemplate();
+      }
+
       getDockerRuntime().setStreamLocked(true);
       markLiveChatStreaming(true);
 
@@ -719,6 +738,96 @@ export const ChatImpl = memo(
 
       if (!chatStarted) {
         setFakeLoading(true);
+
+        const finishFirstPromptUi = () => {
+          setInput('');
+          Cookies.remove(PROMPT_COOKIE_KEY);
+          setUploadedFiles([]);
+          setImageDataList([]);
+          resetEnhancer();
+          textareaRef.current?.blur();
+          setFakeLoading(false);
+        };
+
+        const attempt = await tryApplyCuratedStarter({
+          message: finalMessageContent,
+          model,
+          provider,
+        }).catch((error) => {
+          logger.warn('Curated starter reuse failed; using full generate', error);
+          return null;
+        });
+
+        const reused = attempt?.applied;
+
+        if (reused) {
+          clearPendingAppTemplate();
+          const userMessageText = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${finalMessageContent}`;
+          const now = Date.now();
+
+          if (reused.deltaUserMessage) {
+            setMessages([
+              {
+                id: `1-${now}`,
+                role: 'user',
+                content: userMessageText,
+                parts: createMessageParts(userMessageText, imageDataList),
+              },
+              {
+                id: `2-${now}`,
+                role: 'assistant',
+                content: reused.assistantMessage,
+              },
+              {
+                id: `3-${now}`,
+                role: 'user',
+                content: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${reused.deltaUserMessage}`,
+                annotations: ['hidden'],
+              },
+            ]);
+
+            const reloadOptions =
+              uploadedFiles.length > 0
+                ? { experimental_attachments: await filesToAttachments(uploadedFiles) }
+                : undefined;
+
+            reload(reloadOptions);
+            finishFirstPromptUi();
+
+            return;
+          }
+
+          setMessages([
+            {
+              id: `1-${now}`,
+              role: 'user',
+              content: userMessageText,
+              parts: createMessageParts(userMessageText, imageDataList),
+            },
+            {
+              id: `2-${now}`,
+              role: 'assistant',
+              content: reused.assistantMessage,
+            },
+          ]);
+
+          finishFirstPromptUi();
+          markLiveChatStreaming(false);
+
+          const id = chatId.get();
+
+          if (id) {
+            syncLiveChatUrl(id);
+          }
+
+          window.setTimeout(() => {
+            workbenchStore.schedulePreviewFlush();
+          }, 300);
+
+          return;
+        }
+
+        setPendingAppTemplateFromIntent(attempt?.classification, finalMessageContent);
 
         if (autoSelectTemplate) {
           const { template, title } = await selectStarterTemplate({

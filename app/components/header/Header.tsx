@@ -5,6 +5,7 @@ import { classNames } from '~/utils/classNames';
 import { HeaderActionButtons } from './HeaderActionButtons.client';
 import { ChatDescription } from '~/lib/persistence/ChatDescription.client';
 import { BuildLiveLogo } from '~/components/ui/BuildLiveLogo';
+import { onNewAppClick } from '~/lib/persistence/live-chat-session';
 
 export function Header() {
   const chat = useStore(chatStore);
@@ -21,9 +22,7 @@ export function Header() {
         <a
           href="/"
           className="flex items-center"
-          onClick={() => {
-            void import('~/lib/persistence').then(({ clearLiveChatSession }) => clearLiveChatSession());
-          }}
+          onClick={onNewAppClick}
         >
           <BuildLiveLogo size="md" />
         </a>

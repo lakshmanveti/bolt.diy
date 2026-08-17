@@ -88,11 +88,17 @@ export function readLiveChatSession(chatId?: string): LiveChatSession | null {
 }
 
 /**
- * Recover chat after remount. Prefer an id match; otherwise use the only
- * recent in-flight session so a /chat/:urlId vs numeric chatId mismatch
- * does not dump the user into an empty loader.
+ * Recover chat after remount on a specific chat URL. Never restore onto `/`
+ * (no id) — "New app" must stay a blank homepage.
+ *
+ * If the URL id does not match (urlId vs numeric chatId), fall back to a
+ * still-streaming session so a remount does not dump an empty loader.
  */
 export function recoverLiveChatSession(chatId?: string): LiveChatSession | null {
+  if (!chatId) {
+    return null;
+  }
+
   const matched = readLiveChatSession(chatId);
 
   if (matched) {
@@ -101,15 +107,46 @@ export function recoverLiveChatSession(chatId?: string): LiveChatSession | null 
 
   const any = readLiveChatSession();
 
-  if (!any || !isFresh(any)) {
-    return null;
-  }
-
-  if (chatId && !any.streaming) {
+  if (!any || !isFresh(any) || !any.streaming) {
     return null;
   }
 
   return any;
+}
+
+/**
+ * User explicitly wants a blank homepage. Do not restore or repair the last app.
+ * Hard-navigates so Remix + replaceState desync cannot keep the current chat mounted.
+ */
+export function startNewApp(): void {
+  clearLiveChatSession();
+
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  if (window.location.pathname === '/') {
+    window.location.reload();
+    return;
+  }
+
+  window.location.assign('/');
+}
+
+export function onNewAppClick(event: {
+  preventDefault: () => void;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+  button: number;
+}): void {
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) {
+    return;
+  }
+
+  event.preventDefault();
+  startNewApp();
 }
 
 export function markLiveChatStreaming(streaming: boolean): void {

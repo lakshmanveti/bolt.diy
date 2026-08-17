@@ -20,9 +20,12 @@ export {
   DockerRuntime,
   dockerPreviewBusy,
   dockerPreviewReloadToken,
+  dockerStartStatus,
   verifyPreviewReachable,
 } from './docker-runtime';
 export type { ResumeResult } from './docker-runtime';
+export type { DockerStartStatus, DockerStartStage } from './start-status';
+export { isLiveDockerStartStage } from './start-status';
 export { WebContainerRuntime } from './webcontainer-runtime';
 
 let webcontainerRuntime: WebContainerRuntime | undefined;
