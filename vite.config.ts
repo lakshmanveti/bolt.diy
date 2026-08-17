@@ -19,6 +19,21 @@ export default defineConfig((config) => {
     build: {
       target: 'esnext',
     },
+    server: {
+      watch: {
+        // Generated apps live here. Watching them full-reloads BuildLive mid-generate.
+        ignored: [
+          '**/runtime-daemon/.sessions/**',
+          '**/.runtime-sessions/**',
+          (watchPath: string) => {
+            const normalized = watchPath.replace(/\\/g, '/');
+            return (
+              normalized.includes('/runtime-daemon/.sessions') || normalized.includes('/.runtime-sessions/')
+            );
+          },
+        ],
+      },
+    },
     plugins: [
       nodePolyfills({
         include: ['buffer', 'process', 'util', 'stream'],
@@ -53,7 +68,10 @@ export default defineConfig((config) => {
         },
       }),
       UnoCSS(),
-      tsconfigPaths(),
+      tsconfigPaths({
+        projects: ['./tsconfig.json'],
+      }),
+      ignoreRuntimeSessionsPlugin(),
       chrome129IssuePlugin(),
       config.mode === 'production' && optimizeCssModules({ apply: 'build' }),
     ],
@@ -84,6 +102,17 @@ export default defineConfig((config) => {
     },
   };
 });
+
+function ignoreRuntimeSessionsPlugin() {
+  const ignored = ['**/runtime-daemon/.sessions/**', '**/.runtime-sessions/**'];
+
+  return {
+    name: 'ignore-runtime-sessions',
+    configureServer(server: ViteDevServer) {
+      server.watcher.unwatch(ignored);
+    },
+  };
+}
 
 function chrome129IssuePlugin() {
   return {

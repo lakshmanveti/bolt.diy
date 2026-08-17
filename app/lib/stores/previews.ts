@@ -187,6 +187,11 @@ export class PreviewsStore {
 
     const { previewHealthStore, MAX_PREVIEW_AUTO_RETRIES } = await import('~/lib/stores/preview-health');
     const { dockerPreviewBusy, verifyPreviewReachable } = await import('~/lib/runtime');
+    const { streamingState } = await import('~/lib/stores/streaming');
+
+    if (streamingState.get()) {
+      return;
+    }
 
     const generation = ++this.#previewVerifyGeneration;
     let retries = 0;
@@ -195,11 +200,15 @@ export class PreviewsStore {
     previewHealthStore.set({ status: 'checking', autoRetryCount: 0 });
 
     while (retries <= MAX_PREVIEW_AUTO_RETRIES) {
-      if (generation !== this.#previewVerifyGeneration) {
+      if (generation !== this.#previewVerifyGeneration || streamingState.get()) {
         return;
       }
 
       while (dockerPreviewBusy.get()) {
+        if (streamingState.get()) {
+          return;
+        }
+
         previewHealthStore.set({
           status: 'recovering',
           autoRetryCount: retries,
@@ -207,7 +216,7 @@ export class PreviewsStore {
         });
         await new Promise((r) => setTimeout(r, 300));
 
-        if (generation !== this.#previewVerifyGeneration) {
+        if (generation !== this.#previewVerifyGeneration || streamingState.get()) {
           return;
         }
       }

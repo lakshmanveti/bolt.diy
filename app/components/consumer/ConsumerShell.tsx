@@ -73,6 +73,7 @@ export interface ConsumerShellProps {
   clearDeployAlert?: () => void;
   llmErrorAlert?: LlmErrorAlertType;
   clearLlmErrorAlert?: () => void;
+  retryLlmError?: () => void;
   data?: JSONValue[] | undefined;
   chatMode?: 'discuss' | 'build';
   setChatMode?: (mode: 'discuss' | 'build') => void;
@@ -123,6 +124,7 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
       clearSupabaseAlert,
       llmErrorAlert,
       clearLlmErrorAlert,
+      retryLlmError,
       data,
       chatMode,
       setChatMode,
@@ -452,7 +454,13 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
                 }}
               />
             )}
-            {llmErrorAlert && <LlmErrorAlert alert={llmErrorAlert} clearAlert={() => clearLlmErrorAlert?.()} />}
+            {llmErrorAlert && (
+              <LlmErrorAlert
+                alert={llmErrorAlert}
+                clearAlert={() => clearLlmErrorAlert?.()}
+                onRetry={retryLlmError}
+              />
+            )}
           </div>
         )}
 

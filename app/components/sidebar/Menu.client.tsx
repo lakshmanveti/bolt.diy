@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { Dialog, DialogButton, DialogDescription, DialogRoot, DialogTitle } from '~/components/ui/Dialog';
 import { Button } from '~/components/ui/Button';
-import { db, deleteById, getAll, chatId, type ChatHistoryItem, useChatHistory } from '~/lib/persistence';
+import { db, deleteById, getAll, chatId, clearLiveChatSession, type ChatHistoryItem, useChatHistory } from '~/lib/persistence';
 import { cubicEasingFn } from '~/utils/easings';
 import { HistoryItem } from './HistoryItem';
 import { binDates } from './date-binning';
@@ -109,6 +109,7 @@ export const Menu = () => {
           if (chatId.get() === item.id) {
             // hard page navigation to clear the stores
             console.log('Navigating away from deleted chat');
+            clearLiveChatSession();
             window.location.pathname = '/';
           }
         })
@@ -174,6 +175,7 @@ export const Menu = () => {
       // Navigate if needed
       if (shouldNavigate) {
         console.log('Navigating away from deleted chat');
+        clearLiveChatSession();
         window.location.pathname = '/';
       }
     },
@@ -315,7 +317,7 @@ export const Menu = () => {
         )}
       >
         <div className="flex items-center justify-between gap-3 px-4 py-4 border-b border-bolt-elements-borderColor">
-          <a href="/" className="min-w-0">
+          <a href="/" className="min-w-0" onClick={() => clearLiveChatSession()}>
             <BuildLiveLogo size="md" />
             <div className="text-[11px] text-bolt-elements-textTertiary truncate mt-1">Your apps & conversations</div>
           </a>
@@ -335,6 +337,7 @@ export const Menu = () => {
               <a
                 href="/"
                 className="flex-1 flex gap-2 items-center justify-center bg-accent-500 text-white hover:bg-accent-600 rounded-md px-4 py-2.5 transition-colors"
+                onClick={() => clearLiveChatSession()}
               >
                 <span className="inline-block i-ph:plus h-4 w-4" />
                 <span className="text-sm font-medium">New app</span>

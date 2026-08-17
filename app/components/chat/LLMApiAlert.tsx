@@ -5,9 +5,10 @@ import { classNames } from '~/utils/classNames';
 interface Props {
   alert: LlmErrorAlertType;
   clearAlert: () => void;
+  onRetry?: () => void;
 }
 
-export default function LlmErrorAlert({ alert, clearAlert }: Props) {
+export default function LlmErrorAlert({ alert, clearAlert, onRetry }: Props) {
   const { title, description, provider, errorType } = alert;
 
   const getErrorIcon = () => {
@@ -87,14 +88,30 @@ export default function LlmErrorAlert({ alert, clearAlert }: Props) {
               transition={{ delay: 0.3 }}
             >
               <div className="flex gap-2">
+                {onRetry ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearAlert();
+                      onRetry();
+                    }}
+                    className={classNames(
+                      'px-2 py-1.5 rounded-md text-sm font-medium',
+                      'bg-bolt-elements-button-primary-background',
+                      'hover:bg-bolt-elements-button-primary-backgroundHover',
+                      'text-bolt-elements-button-primary-text',
+                    )}
+                  >
+                    Retry
+                  </button>
+                ) : null}
                 <button
+                  type="button"
                   onClick={clearAlert}
                   className={classNames(
                     'px-2 py-1.5 rounded-md text-sm font-medium',
-                    'bg-bolt-elements-button-secondary-background',
-                    'hover:bg-bolt-elements-button-secondary-backgroundHover',
-                    'focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-bolt-elements-button-secondary-background',
-                    'text-bolt-elements-button-secondary-text',
+                    'bg-transparent text-bolt-elements-textSecondary',
+                    'hover:bg-bolt-elements-item-backgroundActive hover:text-bolt-elements-textPrimary',
                   )}
                 >
                   Dismiss

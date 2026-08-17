@@ -6,7 +6,7 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { resetMessageParser, useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { getDockerRuntime } from '~/lib/runtime';
-import { description, useChatHistory } from '~/lib/persistence';
+import { chatId, description, markLiveChatStreaming, syncLiveChatUrl, useChatHistory, writeLiveChatSession } from '~/lib/persistence';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { getEnvBlockedLlmProviders, getEnvDefaultLlmModel, getEnvDefaultLlmProvider, isBlockedLlmProvider } from '~/lib/modules/llm/defaults';
@@ -53,25 +53,24 @@ export function Chat() {
   renderLogger.trace('Chat');
 
   const { id: mixedId } = useLoaderData<{ id?: string }>() ?? {};
-  const { ready, initialMessages, storeMessageHistory, importChat, exportChat } = useChatHistory();
+  const { ready, initialMessages, interrupted, loadError, retryLoad, storeMessageHistory, importChat, exportChat } =
+    useChatHistory();
   const title = useStore(description);
-  useEffect(() => {
-    workbenchStore.setReloadedMessages(initialMessages.map((m) => m.id));
-  }, [initialMessages]);
 
-  if (!ready && mixedId) {
-    return <SessionRestoreLoader />;
+  if (!ready && mixedId && initialMessages.length === 0) {
+    return <SessionRestoreLoader error={loadError} onRetry={retryLoad} />;
   }
 
   return (
     <>
-      {ready && (
+      {(ready || initialMessages.length > 0) && (
         <ChatImpl
           description={title}
           initialMessages={initialMessages}
           exportChat={exportChat}
           storeMessageHistory={storeMessageHistory}
           importChat={importChat}
+          interrupted={interrupted}
         />
       )}
     </>
@@ -93,7 +92,17 @@ const processSampledMessages = createSampler(
       getDockerRuntime().setHydrateSkipWrites(false);
     }
 
+    if (isLoading) {
+      getDockerRuntime().setStreamLocked(true);
+    }
+
     parseMessages(messages, isLoading);
+
+    const id = chatId.get();
+
+    if (id && messages.length > 0) {
+      writeLiveChatSession({ chatId: id, messages, streaming: isLoading });
+    }
 
     if (messages.length > initialMessages.length) {
       storeMessageHistory(messages).catch((error) => toast.error(error.message));
@@ -108,10 +117,11 @@ interface ChatProps {
   importChat: (description: string, messages: Message[]) => Promise<void>;
   exportChat: () => void;
   description?: string;
+  interrupted?: boolean;
 }
 
 export const ChatImpl = memo(
-  ({ description, initialMessages, storeMessageHistory, importChat, exportChat }: ChatProps) => {
+  ({ description, initialMessages, storeMessageHistory, importChat, exportChat, interrupted }: ChatProps) => {
     useShortcuts();
 
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -120,6 +130,19 @@ export const ChatImpl = memo(
     const [imageDataList, setImageDataList] = useState<string[]>([]);
     const [searchParams, setSearchParams] = useSearchParams();
     const [fakeLoading, setFakeLoading] = useState(false);
+
+    useEffect(() => {
+      if (interrupted) {
+        workbenchStore.setReloadedMessages([]);
+        return;
+      }
+
+      if (initialMessages.length > 0) {
+        workbenchStore.setReloadedMessages(initialMessages.map((message) => message.id));
+      }
+      // Only on mount — mid-generate updates must not mark actions as already replayed.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
     const files = useStore(workbenchStore.files);
     const [designScheme, setDesignScheme] = useState<DesignScheme>(defaultDesignScheme);
     const actionAlert = useStore(workbenchStore.alert);
@@ -331,6 +354,7 @@ export const ChatImpl = memo(
         handleError(e, 'chat');
       },
       onFinish: (message, response) => {
+        markLiveChatStreaming(false);
         const usage = response.usage;
         setData(undefined);
 
@@ -394,19 +418,81 @@ export const ChatImpl = memo(
       });
     }, [messages, isLoading, parseMessages, initialMessages]);
 
+    const messagesRef = useRef(messages);
+    messagesRef.current = messages;
+
     const wasStreamingRef = useRef(false);
 
     useEffect(() => {
       const streaming = isLoading || fakeLoading;
 
-      if (wasStreamingRef.current && !streaming) {
-        window.setTimeout(() => {
-          workbenchStore.schedulePreviewFlush();
-        }, 200);
+      if (streaming) {
+        getDockerRuntime().setStreamLocked(true);
+        markLiveChatStreaming(true);
       }
 
-      wasStreamingRef.current = streaming;
+      // Only boot preview after the real /api/chat stream ends — not when
+      // fakeLoading drops during starter-template setup.
+      if (wasStreamingRef.current && !isLoading && !fakeLoading) {
+        markLiveChatStreaming(false);
+
+        const id = chatId.get();
+
+        if (id) {
+          syncLiveChatUrl(id);
+        }
+
+        window.setTimeout(() => {
+          workbenchStore.schedulePreviewFlush();
+        }, 300);
+      }
+
+      wasStreamingRef.current = isLoading;
     }, [isLoading, fakeLoading]);
+
+    useEffect(() => {
+      if (!interrupted || isLoading || fakeLoading) {
+        return;
+      }
+
+      setLlmErrorAlert({
+        type: 'warning',
+        title: 'Generation interrupted',
+        description: 'Your chat is still here. Retry to continue building the app.',
+        errorType: 'network',
+      });
+    }, [interrupted, isLoading, fakeLoading]);
+
+    const retryGeneration = useCallback(() => {
+      setLlmErrorAlert(undefined);
+      workbenchStore.setReloadedMessages([]);
+      getDockerRuntime().setHydrateSkipWrites(false);
+      getDockerRuntime().setStreamLocked(true);
+      markLiveChatStreaming(true);
+
+      const current = messagesRef.current;
+      let lastUserIndex = -1;
+
+      for (let i = current.length - 1; i >= 0; i -= 1) {
+        if (current[i]?.role === 'user') {
+          lastUserIndex = i;
+          break;
+        }
+      }
+
+      if (lastUserIndex < 0) {
+        toast.error('Nothing to retry');
+        markLiveChatStreaming(false);
+        return;
+      }
+
+      const next = current.slice(0, lastUserIndex + 1);
+      setMessages(next);
+
+      window.setTimeout(() => {
+        void reload();
+      }, 0);
+    }, [reload, setMessages]);
 
     const scrollTextArea = () => {
       const textarea = textareaRef.current;
@@ -420,6 +506,9 @@ export const ChatImpl = memo(
       stop();
       chatStore.setKey('aborted', true);
       workbenchStore.abortAllActions();
+      window.setTimeout(() => {
+        workbenchStore.schedulePreviewFlush();
+      }, 300);
 
       logStore.logProvider('Chat response aborted', {
         component: 'Chat',
@@ -495,6 +584,9 @@ export const ChatImpl = memo(
           errorType,
         });
         setData([]);
+        window.setTimeout(() => {
+          workbenchStore.schedulePreviewFlush();
+        }, 300);
       },
       [provider.name, stop],
     );
@@ -609,6 +701,9 @@ export const ChatImpl = memo(
         abort();
         return;
       }
+
+      getDockerRuntime().setStreamLocked(true);
+      markLiveChatStreaming(true);
 
       let finalMessageContent = messageContent;
 
@@ -901,6 +996,7 @@ export const ChatImpl = memo(
         clearDeployAlert={() => workbenchStore.clearDeployAlert()}
         llmErrorAlert={llmErrorAlert}
         clearLlmErrorAlert={clearApiErrorAlert}
+        retryLlmError={retryGeneration}
         data={chatData}
         chatMode={chatMode}
         setChatMode={setChatMode}

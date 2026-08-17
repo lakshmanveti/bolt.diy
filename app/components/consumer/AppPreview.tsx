@@ -126,7 +126,14 @@ function PreviewToolbar({
 
       <div className="flex items-center gap-1.5 shrink-0">
         <Tooltip content="New app" delayDuration={200}>
-          <a href="/" className={iconBtn(true)} aria-label="New app">
+          <a
+            href="/"
+            className={iconBtn(true)}
+            aria-label="New app"
+            onClick={() => {
+              void import('~/lib/persistence').then(({ clearLiveChatSession }) => clearLiveChatSession());
+            }}
+          >
             <div className="i-ph:plus w-4 h-4" />
           </a>
         </Tooltip>
@@ -286,6 +293,8 @@ export const AppPreview = memo(
     const iframeRef = useRef<HTMLIFrameElement>(null);
     const [previewBust, setPreviewBust] = useState(() => Date.now());
     const hasSelectedPreview = useRef(false);
+    const streamTurnRef = useRef(false);
+    const [suppressLivePreview, setSuppressLivePreview] = useState(false);
     const [activeIndex, setActiveIndex] = useState(0);
     const [mobileView, setMobileView] = useState(false);
     const [landscape, setLandscape] = useState(false);
@@ -360,24 +369,46 @@ export const AppPreview = memo(
     const active = readyPreviews[activeIndex] ?? readyPreviews[0];
     const embedUrl = active?.baseUrl ? toEmbeddablePreviewUrl(active.baseUrl) : undefined;
 
+    useEffect(() => {
+      if (isStreaming) {
+        if (!streamTurnRef.current) {
+          streamTurnRef.current = true;
+          setSuppressLivePreview(!active);
+        }
+
+        return;
+      }
+
+      streamTurnRef.current = false;
+      setSuppressLivePreview(false);
+    }, [isStreaming, active]);
+
     const iframeSrc = embedUrl ? withPreviewCacheBust(embedUrl, previewBust) : undefined;
     const liveUi = useLivePreviewUi(embedUrl || '');
     const prevHealthRef = useRef(previewHealth.status);
 
     useEffect(() => {
+      if (isStreaming || suppressLivePreview) {
+        return;
+      }
+
       if (reloadToken > 0) {
         setPreviewBust(Date.now());
       }
-    }, [reloadToken]);
+    }, [reloadToken, isStreaming, suppressLivePreview]);
 
     useEffect(() => {
       const prev = prevHealthRef.current;
       prevHealthRef.current = previewHealth.status;
 
+      if (isStreaming || suppressLivePreview) {
+        return;
+      }
+
       if (prev !== 'healthy' && previewHealth.status === 'healthy') {
         setPreviewBust(Date.now());
       }
-    }, [previewHealth.status]);
+    }, [previewHealth.status, isStreaming, suppressLivePreview]);
 
     const reload = useCallback(() => {
       setPreviewBust(Date.now());
@@ -420,7 +451,7 @@ export const AppPreview = memo(
       />
     );
 
-    if (!active) {
+    if (!active || suppressLivePreview) {
       return (
         <div className="flex h-full w-full flex-col bg-bolt-elements-background-depth-1">
           {toolbar}
@@ -451,7 +482,8 @@ export const AppPreview = memo(
             </div>
           )}
 
-          {(previewBusy || previewHealth.status === 'recovering' || previewHealth.status === 'unreachable') && (
+          {!isStreaming &&
+            (previewBusy || previewHealth.status === 'recovering' || previewHealth.status === 'unreachable') && (
             <div
               className="absolute inset-0 z-20 flex items-center justify-center bg-bolt-elements-background-depth-1/90 px-6 backdrop-blur-sm"
               role="status"

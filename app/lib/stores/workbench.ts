@@ -138,7 +138,7 @@ export class WorkbenchStore {
   schedulePreviewFlush() {
     this.addToExecutionQueue(async () => {
       const { getDockerRuntime } = await import('~/lib/runtime');
-      await getDockerRuntime().flushPreview();
+      await getDockerRuntime().flushPreview({ fromStreamEnd: true });
     });
   }
 

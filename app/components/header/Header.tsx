@@ -18,7 +18,13 @@ export function Header() {
     >
       <div className="flex items-center gap-2 z-logo text-bolt-elements-textPrimary cursor-pointer">
         <div className="i-ph:sidebar-simple-duotone text-xl" />
-        <a href="/" className="flex items-center">
+        <a
+          href="/"
+          className="flex items-center"
+          onClick={() => {
+            void import('~/lib/persistence').then(({ clearLiveChatSession }) => clearLiveChatSession());
+          }}
+        >
           <BuildLiveLogo size="md" />
         </a>
       </div>

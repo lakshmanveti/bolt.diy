@@ -26,6 +26,7 @@ import { getEffectiveExecutionTarget, getDockerRuntime, isDockerRuntimeAvailable
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
 import { APP_NAME } from '~/utils/brand';
+import { recoverLiveChatSession, writeLiveChatSession } from './live-chat-session';
 
 export interface ChatHistoryItem {
   id: string;
@@ -50,10 +51,14 @@ export function useChatHistory() {
   const authReady = useStore(authReadyStore);
   const authUser = useStore(authUserStore);
 
+  const recovered = recoverLiveChatSession(mixedId);
   const [archivedMessages, setArchivedMessages] = useState<Message[]>([]);
-  const [initialMessages, setInitialMessages] = useState<Message[]>([]);
-  const [ready, setReady] = useState<boolean>(false);
+  const [initialMessages, setInitialMessages] = useState<Message[]>(() => recovered?.messages ?? []);
+  const [ready, setReady] = useState<boolean>(() => !mixedId || Boolean(recovered?.messages.length));
   const [urlId, setUrlId] = useState<string | undefined>();
+  const [loadError, setLoadError] = useState<string | undefined>();
+  const [interrupted, setInterrupted] = useState(() => Boolean(recovered?.streaming));
+  const [loadGeneration, setLoadGeneration] = useState(0);
 
   useEffect(() => {
     if (!db) {
@@ -70,6 +75,10 @@ export function useChatHistory() {
 
     // Wait for auth hydration so we don't miss Supabase reads on first paint
     if (isSupabaseConfigured() && !authReady) {
+      if (!mixedId || initialMessages.length > 0) {
+        setReady(true);
+      }
+
       return;
     }
 
@@ -78,10 +87,15 @@ export function useChatHistory() {
     }
 
     if (mixedId) {
-      Promise.all([
+      const load = Promise.all([
         getMessages(db, mixedId),
-        getSnapshot(db, mixedId), // Fetch snapshot from DB
-      ])
+        getSnapshot(db, mixedId),
+      ]);
+      const timeout = new Promise<never>((_, reject) => {
+        window.setTimeout(() => reject(new Error('Timed out loading chat')), 8000);
+      });
+
+      Promise.race([load, timeout])
         .then(async ([storedMessages, snapshot]) => {
           if (storedMessages && storedMessages.messages.length > 0) {
             /*
@@ -225,21 +239,17 @@ ${value.content}
               ];
               restoreSnapshot(mixedId, validSnapshot);
             } else if (getEffectiveExecutionTarget() === 'docker' && isDockerRuntimeAvailable()) {
-              // No snapshot cold-restore path — still attach a warm Docker session if one exists
-              try {
-                chatId.set(storedMessages.id);
-                const resume = await getDockerRuntime().resume(storedMessages.id);
-
-                if (resume.hasFiles) {
-                  getDockerRuntime().setHydrateSkipWrites(true);
-                }
-
-                if (resume.preview?.ready) {
-                  console.log('[ChatHistory] Docker session attached (no snapshot restore)');
-                }
-              } catch (error) {
-                console.warn('[ChatHistory] Docker resume skipped', error);
-              }
+              chatId.set(storedMessages.id);
+              void getDockerRuntime()
+                .resume(storedMessages.id)
+                .then((resume) => {
+                  if (resume.hasFiles) {
+                    getDockerRuntime().setHydrateSkipWrites(true);
+                  }
+                })
+                .catch((error) => {
+                  console.warn('[ChatHistory] Docker resume skipped', error);
+                });
             }
 
             setInitialMessages(filteredMessages);
@@ -249,7 +259,15 @@ ${value.content}
             chatId.set(storedMessages.id);
             chatMetadata.set(storedMessages.metadata);
           } else {
-            navigate('/', { replace: true });
+            const live = recoverLiveChatSession(mixedId);
+
+            if (live?.messages.length) {
+              setInitialMessages(live.messages);
+              chatId.set(live.chatId);
+              setInterrupted(Boolean(live.streaming));
+            } else if (initialMessages.length === 0) {
+              setLoadError('This chat could not be loaded. Retry to try again.');
+            }
           }
 
           setReady(true);
@@ -257,14 +275,25 @@ ${value.content}
         .catch((error) => {
           console.error(error);
 
-          logStore.logError('Failed to load chat messages or snapshot', error); // Updated error message
-          toast.error('Failed to load chat: ' + error.message); // More specific error
+          logStore.logError('Failed to load chat messages or snapshot', error);
+          toast.error('Failed to load chat: ' + error.message);
+
+          const live = recoverLiveChatSession(mixedId);
+
+          if (live?.messages.length) {
+            setInitialMessages(live.messages);
+            chatId.set(live.chatId);
+            setInterrupted(true);
+          } else {
+            setLoadError(error instanceof Error ? error.message : 'Failed to load chat');
+          }
+
+          setReady(true);
         });
     } else {
-      // Handle case where there is no mixedId (e.g., new chat)
       setReady(true);
     }
-  }, [mixedId, db, navigate, searchParams, authReady, authUser?.id]); // auth so Supabase reads run after session hydrate
+  }, [mixedId, db, navigate, searchParams, authReady, authUser?.id, loadGeneration]);
 
   const takeSnapshot = useCallback(
     async (chatIdx: string, files: FileMap, _chatId?: string | undefined, chatSummary?: string) => {
@@ -309,8 +338,26 @@ ${value.content}
   }, []);
 
   return {
-    ready: !mixedId || ready,
+    ready: !mixedId || ready || initialMessages.length > 0,
     initialMessages,
+    interrupted,
+    loadError,
+    retryLoad: () => {
+      const live = recoverLiveChatSession(mixedId);
+
+      if (live?.messages.length) {
+        setInitialMessages(live.messages);
+        chatId.set(live.chatId);
+        setInterrupted(Boolean(live.streaming));
+        setLoadError(undefined);
+        setReady(true);
+        return;
+      }
+
+      setLoadError(undefined);
+      setReady(false);
+      setLoadGeneration((n) => n + 1);
+    },
     updateChatMestaData: async (metadata: IChatMetadata) => {
       const id = chatId.get();
 
@@ -337,10 +384,8 @@ ${value.content}
       let _urlId = urlId;
 
       if (!urlId && firstArtifact?.id) {
-        const urlId = await getUrlId(db, firstArtifact.id);
-        _urlId = urlId;
-        navigateChat(urlId);
-        setUrlId(urlId);
+        _urlId = await getUrlId(db, firstArtifact.id);
+        setUrlId(_urlId);
       }
 
       let chatSummary: string | undefined = undefined;
@@ -364,18 +409,10 @@ ${value.content}
         description.set(firstArtifact?.title);
       }
 
-      // Ensure chatId.get() is used here as well
       if (initialMessages.length === 0 && !chatId.get()) {
-        const nextId = await getNextId(db);
-
-        chatId.set(nextId);
-
-        if (!urlId) {
-          navigateChat(nextId);
-        }
+        chatId.set(await getNextId(db));
       }
 
-      // Ensure chatId.get() is used for the final setMessages call
       const finalChatId = chatId.get();
 
       if (!finalChatId) {
@@ -385,11 +422,18 @@ ${value.content}
         return;
       }
 
+      writeLiveChatSession({
+        chatId: finalChatId,
+        urlId: _urlId,
+        messages,
+        streaming: true,
+      });
+
       await setMessages(
         db,
-        finalChatId, // Use the potentially updated chatId
+        finalChatId,
         [...archivedMessages, ...messages],
-        urlId,
+        _urlId,
         description.get(),
         undefined,
         chatMetadata.get(),
@@ -451,17 +495,4 @@ ${value.content}
       URL.revokeObjectURL(url);
     },
   };
-}
-
-function navigateChat(nextId: string) {
-  /**
-   * FIXME: Using the intended navigate function causes a rerender for <Chat /> that breaks the app.
-   *
-   * `navigate(`/chat/${nextId}`, { replace: true });`
-   */
-  const url = new URL(window.location.href);
-  const isStudio = window.location.pathname.startsWith('/studio');
-  url.pathname = isStudio ? `/studio/chat/${nextId}` : `/chat/${nextId}`;
-
-  window.history.replaceState({}, '', url);
 }

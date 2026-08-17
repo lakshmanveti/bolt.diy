@@ -97,6 +97,8 @@ export class DockerRuntime implements AppRuntime {
   #reloadTimer: ReturnType<typeof setTimeout> | undefined;
   #previewLock: Promise<unknown> = Promise.resolve();
   #filesWrittenSinceRedeploy = false;
+  #streamLocked = false;
+  #pendingStartCommand: string | undefined;
   #consecutiveFailures = 0;
   #healthInFlight: Promise<boolean> | undefined;
   /** When reopening a chat, skip rewriting files/exec/start that are already on disk. */
@@ -118,6 +120,23 @@ export class DockerRuntime implements AppRuntime {
     await this.ensureSession(this.#sessionKey);
   }
 
+  /**
+   * While the LLM stream is in flight: write files only. Do not start, restart,
+   * or remount the live preview until flushPreview({ fromStreamEnd: true }).
+   */
+  setStreamLocked(locked: boolean): void {
+    if (this.#streamLocked === locked) {
+      return;
+    }
+
+    this.#streamLocked = locked;
+
+    if (locked && this.#reloadTimer) {
+      clearTimeout(this.#reloadTimer);
+      this.#reloadTimer = undefined;
+      dockerPreviewBusy.set(false);
+    }
+  }
   /**
    * Chat reopen: session files/preview already exist — don't replay snapshot writes.
    * Cleared automatically on the next real user turn.
@@ -288,10 +307,10 @@ export class DockerRuntime implements AppRuntime {
     }
 
     if (!this.#hydrateSkipWrites && !SKIP_RELOAD_FILES.test(normalized)) {
-      // Host bind-mount writes don't invalidate Vite's in-memory transform cache.
       this.#filesWrittenSinceRedeploy = true;
 
-      if (this.#lastPreviewUrl) {
+      // Never restart Docker while /api/chat is still streaming.
+      if (!this.#streamLocked && this.#lastPreviewUrl) {
         this.#schedulePreviewRedeploy();
       }
     }
@@ -308,8 +327,12 @@ export class DockerRuntime implements AppRuntime {
    * After a chat turn finishes (including "Ask BuildLive" error fixes), wait for
    * pending file writes to land, restart if needed, then remount the iframe.
    */
-  async flushPreview(): Promise<void> {
-    if (this.#hydrateSkipWrites) {
+  async flushPreview(options?: { fromStreamEnd?: boolean }): Promise<void> {
+    if (options?.fromStreamEnd) {
+      this.#streamLocked = false;
+    }
+
+    if (this.#hydrateSkipWrites || this.#streamLocked) {
       return;
     }
 
@@ -320,13 +343,27 @@ export class DockerRuntime implements AppRuntime {
       this.#reloadTimer = undefined;
     }
 
-    // Wait for an in-flight start/restart so we don't kill a server that just came up
     await this.#withPreviewLock(async () => undefined);
+
+    if (this.#pendingStartCommand && !this.#lastPreviewUrl) {
+      const command = this.#pendingStartCommand;
+      this.#pendingStartCommand = undefined;
+      await this.#startProcess(command);
+      return;
+    }
 
     if (this.#filesWrittenSinceRedeploy || !this.#lastPreviewUrl) {
       const preview = await this.#redeployPreview();
 
       if (preview) {
+        this.#pendingStartCommand = undefined;
+        return;
+      }
+
+      if (this.#pendingStartCommand) {
+        const command = this.#pendingStartCommand;
+        this.#pendingStartCommand = undefined;
+        await this.#startProcess(command);
         return;
       }
     }
@@ -348,6 +385,17 @@ export class DockerRuntime implements AppRuntime {
    * Emits a new preview event when the daemon reports ready.
    */
   async recoverPreview(): Promise<PreviewInfoEvent | null> {
+    if (this.#streamLocked) {
+      if (this.#lastPreviewUrl) {
+        return {
+          port: this.#lastPreviewPort || 5173,
+          ready: true,
+          baseUrl: this.#lastPreviewUrl,
+        };
+      }
+
+      return null;
+    }
     await this.ensureSession();
 
     if (!this.#sessionId) {
@@ -374,7 +422,7 @@ export class DockerRuntime implements AppRuntime {
   }
 
   #schedulePreviewRedeploy(delayMs = 1500) {
-    if (this.#hydrateSkipWrites) {
+    if (this.#hydrateSkipWrites || this.#streamLocked) {
       return;
     }
 
@@ -403,7 +451,7 @@ export class DockerRuntime implements AppRuntime {
   }
 
   async #restartPreviewProcess(): Promise<PreviewInfoEvent | null> {
-    if (!this.#sessionId) {
+    if (!this.#sessionId || this.#streamLocked) {
       return null;
     }
 
@@ -439,7 +487,7 @@ export class DockerRuntime implements AppRuntime {
   }
 
   async #redeployPreview(): Promise<PreviewInfoEvent | null> {
-    if (this.#hydrateSkipWrites || !this.#sessionId) {
+    if (this.#hydrateSkipWrites || !this.#sessionId || this.#streamLocked) {
       return null;
     }
 
@@ -525,10 +573,12 @@ export class DockerRuntime implements AppRuntime {
       };
     }
 
-    /*
-     * Follow-up start: don't fire a second /start. File writes already marked
-     * the preview dirty; wait for that restart so the iframe reloads after.
-     */
+    if (this.#streamLocked) {
+      this.#pendingStartCommand = command;
+      this.#filesWrittenSinceRedeploy = true;
+      return;
+    }
+
     if (this.#lastPreviewUrl) {
       if (this.#reloadTimer) {
         clearTimeout(this.#reloadTimer);
@@ -542,7 +592,16 @@ export class DockerRuntime implements AppRuntime {
       }
     }
 
+    return this.#startProcess(command);
+  }
+
+  async #startProcess(command: string): Promise<PreviewInfoEvent | void> {
     return this.#withPreviewLock(async () => {
+      if (this.#streamLocked) {
+        this.#pendingStartCommand = command;
+        return;
+      }
+
       dockerPreviewBusy.set(true);
 
       try {
@@ -569,6 +628,7 @@ export class DockerRuntime implements AppRuntime {
           this.#emitPreview(event);
           this.#bumpReloadToken();
           this.#filesWrittenSinceRedeploy = false;
+          this.#pendingStartCommand = undefined;
 
           return event;
         }
@@ -639,7 +699,7 @@ export class DockerRuntime implements AppRuntime {
   }
 
   async #pollPreview() {
-    if (!this.#sessionId || this.#previewListeners.size === 0) {
+    if (!this.#sessionId || this.#previewListeners.size === 0 || this.#streamLocked) {
       return;
     }
 
