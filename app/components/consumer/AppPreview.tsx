@@ -427,10 +427,6 @@ export const AppPreview = memo(
         const next = !prev;
         postInspectorState(next);
 
-        if (next) {
-          toast.info('Click anything in the preview to edit it');
-        }
-
         return next;
       });
     }, [postInspectorState]);

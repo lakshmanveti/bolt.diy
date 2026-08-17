@@ -7,7 +7,7 @@ export function AuthLoadingScreen() {
       <div className="flex flex-col items-center gap-4 text-center">
         <BuildLiveLogo size="lg" />
         <span className="i-svg-spinners:90-ring-with-bg text-2xl text-accent-500" />
-        <p className="text-sm text-bolt-elements-textSecondary">Checking your session…</p>
+        <p className="text-sm text-bolt-elements-textSecondary">Hang on — checking if it’s you…</p>
       </div>
     </div>
   );

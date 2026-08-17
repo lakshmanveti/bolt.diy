@@ -122,8 +122,12 @@ export const ConsumerMessages = forwardRef<HTMLDivElement, ConsumerMessagesProps
               const { role, content, parts } = message;
               const isUserMessage = role === 'user';
               const isHidden = message.annotations?.includes('hidden');
+              const contentText = typeof content === 'string' ? content : '';
+              const isSnapshotBanner =
+                contentText.includes('restored your chat from a snapshot') ||
+                contentText.includes('id="restored-project-setup"');
 
-              if (isHidden) {
+              if (isHidden || isSnapshotBanner) {
                 return <Fragment key={index} />;
               }
 

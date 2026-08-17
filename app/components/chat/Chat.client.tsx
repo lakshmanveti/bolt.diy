@@ -4,7 +4,7 @@ import { useChat } from '@ai-sdk/react';
 import { useAnimate } from 'framer-motion';
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
-import { resetMessageParser, useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
+import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { getDockerRuntime } from '~/lib/runtime';
 import { chatId, description, markLiveChatStreaming, syncLiveChatUrl, useChatHistory, writeLiveChatSession } from '~/lib/persistence';
 import { chatStore } from '~/lib/stores/chat';
@@ -57,14 +57,15 @@ export function Chat() {
     useChatHistory();
   const title = useStore(description);
 
-  if (!ready && mixedId && initialMessages.length === 0) {
+  if (mixedId && !ready) {
     return <SessionRestoreLoader error={loadError} onRetry={retryLoad} />;
   }
 
   return (
     <>
-      {(ready || initialMessages.length > 0) && (
+      {ready && (
         <ChatImpl
+          key={mixedId ?? 'new'}
           description={title}
           initialMessages={initialMessages}
           exportChat={exportChat}
@@ -391,7 +392,7 @@ export const ChatImpl = memo(
     }, [model, provider, searchParams]);
 
     const { enhancingPrompt, promptEnhanced, enhancePrompt, resetEnhancer } = usePromptEnhancer();
-    const { parsedMessages, parseMessages } = useMessageParser();
+    const { parsedMessages, parseMessages, resetParser } = useMessageParser();
 
     const TEXTAREA_MAX_HEIGHT = chatStarted ? 400 : 200;
 
@@ -406,7 +407,7 @@ export const ChatImpl = memo(
 
       if (parsedChatKey.current !== key) {
         parsedChatKey.current = key;
-        resetMessageParser();
+        resetParser();
       }
 
       processSampledMessages({
@@ -416,7 +417,7 @@ export const ChatImpl = memo(
         parseMessages,
         storeMessageHistory,
       });
-    }, [messages, isLoading, parseMessages, initialMessages]);
+    }, [messages, isLoading, parseMessages, resetParser, initialMessages]);
 
     const messagesRef = useRef(messages);
     messagesRef.current = messages;

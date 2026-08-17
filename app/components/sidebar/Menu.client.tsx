@@ -44,6 +44,7 @@ export const Menu = () => {
   const { duplicateCurrentChat, exportChat } = useChatHistory();
   const menuRef = useRef<HTMLDivElement>(null);
   const [list, setList] = useState<ChatHistoryItem[]>([]);
+  const [listLoading, setListLoading] = useState(false);
   const open = useStore(sidebarOpenStore);
   const [dialogContent, setDialogContent] = useState<DialogContent>(null);
   const [selectionMode, setSelectionMode] = useState(false);
@@ -58,12 +59,16 @@ export const Menu = () => {
   });
 
   const loadEntries = useCallback(() => {
-    if (db) {
-      getAll(db)
-        .then((list) => list.filter((item) => item.urlId && item.description))
-        .then(setList)
-        .catch((error) => toast.error(error.message));
+    if (!db) {
+      return;
     }
+
+    setListLoading(true);
+    getAll(db)
+      .then((list) => list.filter((item) => item.urlId && item.description))
+      .then(setList)
+      .catch((error) => toast.error(error.message))
+      .finally(() => setListLoading(false));
   }, []);
 
   const deleteChat = useCallback(
@@ -387,6 +392,22 @@ export const Menu = () => {
             )}
           </div>
           <div className="flex-1 overflow-auto px-3 pb-3">
+            {listLoading && list.length === 0 ? (
+              <div className="flex flex-col gap-2 px-1 pt-2" role="status" aria-label="Loading conversations">
+                <div className="flex items-center gap-2 px-3 py-2 text-sm text-bolt-elements-textSecondary">
+                  <span className="i-svg-spinners:90-ring-with-bg h-4 w-4 text-accent-500" />
+                  Loading your chats…
+                </div>
+                {Array.from({ length: 6 }).map((_, index) => (
+                  <div
+                    key={index}
+                    className="h-10 animate-pulse rounded-md bg-bolt-elements-background-depth-2"
+                    style={{ opacity: 1 - index * 0.1 }}
+                  />
+                ))}
+              </div>
+            ) : (
+              <>
             {filteredList.length === 0 && (
               <div className="px-4 text-bolt-elements-textTertiary text-sm">
                 {list.length === 0 ? 'No apps yet — describe one to get started' : 'No matches found'}
@@ -496,6 +517,8 @@ export const Menu = () => {
                 )}
               </Dialog>
             </DialogRoot>
+              </>
+            )}
           </div>
           <AuthButton />
         </div>

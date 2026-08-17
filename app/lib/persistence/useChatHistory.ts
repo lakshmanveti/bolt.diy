@@ -2,7 +2,7 @@ import { useLoaderData, useNavigate, useSearchParams } from '@remix-run/react';
 import { useState, useEffect, useCallback } from 'react';
 import { atom } from 'nanostores';
 import { useStore } from '@nanostores/react';
-import { generateId, type JSONValue, type Message } from 'ai';
+import { type JSONValue, type Message } from 'ai';
 import { toast } from 'react-toastify';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { logStore } from '~/lib/stores/logs'; // Import logStore
@@ -23,10 +23,29 @@ import { authReadyStore, authUserStore, isSupabaseConfigured } from '~/lib/supab
 import type { FileMap } from '~/lib/stores/files';
 import type { Snapshot } from './types';
 import { getEffectiveExecutionTarget, getDockerRuntime, isDockerRuntimeAvailable } from '~/lib/runtime';
-import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
-import type { ContextAnnotation } from '~/types/context';
-import { APP_NAME } from '~/utils/brand';
 import { recoverLiveChatSession, writeLiveChatSession } from './live-chat-session';
+
+function isSyntheticSnapshotMessage(message: Message): boolean {
+  const content = typeof message.content === 'string' ? message.content : '';
+
+  if (
+    message.annotations?.includes('no-store') &&
+    (content.includes('Restore project from snapshot') ||
+      content.includes('restored-project-setup') ||
+      content.includes('restored your chat from a snapshot'))
+  ) {
+    return true;
+  }
+
+  return (
+    content.includes('id="restored-project-setup"') ||
+    (message.role === 'assistant' && content.includes('restored your chat from a snapshot'))
+  );
+}
+
+function withoutSyntheticSnapshotMessages(messages: Message[]): Message[] {
+  return messages.filter((message) => !isSyntheticSnapshotMessage(message));
+}
 
 export interface ChatHistoryItem {
   id: string;
@@ -53,8 +72,10 @@ export function useChatHistory() {
 
   const recovered = recoverLiveChatSession(mixedId);
   const [archivedMessages, setArchivedMessages] = useState<Message[]>([]);
-  const [initialMessages, setInitialMessages] = useState<Message[]>(() => recovered?.messages ?? []);
-  const [ready, setReady] = useState<boolean>(() => !mixedId || Boolean(recovered?.messages.length));
+  const [initialMessages, setInitialMessages] = useState<Message[]>(
+    () => withoutSyntheticSnapshotMessages(recovered?.messages ?? []),
+  );
+  const [ready, setReady] = useState<boolean>(() => !mixedId || Boolean(recovered?.streaming));
   const [urlId, setUrlId] = useState<string | undefined>();
   const [loadError, setLoadError] = useState<string | undefined>();
   const [interrupted, setInterrupted] = useState(() => Boolean(recovered?.streaming));
@@ -75,7 +96,7 @@ export function useChatHistory() {
 
     // Wait for auth hydration so we don't miss Supabase reads on first paint
     if (isSupabaseConfigured() && !authReady) {
-      if (!mixedId || initialMessages.length > 0) {
+      if (!mixedId) {
         setReady(true);
       }
 
@@ -102,158 +123,49 @@ export function useChatHistory() {
              * const snapshotStr = localStorage.getItem(`snapshot:${mixedId}`); // Remove localStorage usage
              * const snapshot: Snapshot = snapshotStr ? JSON.parse(snapshotStr) : { chatIndex: 0, files: {} }; // Use snapshot from DB
              */
-            const validSnapshot = snapshot || { chatIndex: '', files: {} }; // Ensure snapshot is not undefined
-            const summary = validSnapshot.summary;
+            const validSnapshot = snapshot || { chatIndex: '', files: {} };
 
             const rewindId = searchParams.get('rewindTo');
-            let startingIdx = -1;
-            const endingIdx = rewindId
-              ? storedMessages.messages.findIndex((m) => m.id === rewindId) + 1
-              : storedMessages.messages.length;
-            const snapshotIndex = storedMessages.messages.findIndex((m) => m.id === validSnapshot.chatIndex);
+            const rewindIdx = rewindId
+              ? storedMessages.messages.findIndex((m) => m.id === rewindId)
+              : -1;
+            const endingIdx = rewindIdx >= 0 ? rewindIdx + 1 : storedMessages.messages.length;
 
-            if (snapshotIndex >= 0 && snapshotIndex < endingIdx) {
-              startingIdx = snapshotIndex;
-            }
+            /*
+             * Show the real conversation. Snapshot files hydrate Docker/editor
+             * silently — do not replace chat with a "restored from snapshot" banner.
+             */
+            setArchivedMessages([]);
 
-            if (snapshotIndex > 0 && storedMessages.messages[snapshotIndex].id == rewindId) {
-              startingIdx = -1;
-            }
+            const filteredMessages = withoutSyntheticSnapshotMessages(
+              storedMessages.messages.slice(0, endingIdx),
+            );
 
-            let filteredMessages = storedMessages.messages.slice(startingIdx + 1, endingIdx);
-            let archivedMessages: Message[] = [];
-
-            if (startingIdx >= 0) {
-              archivedMessages = storedMessages.messages.slice(0, startingIdx + 1);
-            }
-
-            setArchivedMessages(archivedMessages);
-
-            if (startingIdx > 0) {
-              const files = Object.entries(validSnapshot?.files || {})
-                .map(([key, value]) => {
-                  if (value?.type !== 'file') {
-                    return null;
-                  }
-
-                  return {
-                    content: value.content,
-                    path: key,
-                  };
-                })
-                .filter((x): x is { content: string; path: string } => !!x); // Type assertion
-              const projectCommands = await detectProjectCommands(files);
-
-              /*
-               * Docker resume: reuse workdir / warm preview for this chatId.
-               * Skip npm install when node_modules exists; skip start when preview is already up.
-               */
-              let includeSetup = true;
-              let includeStart = true;
-              let includeFiles = true;
-
-              if (getEffectiveExecutionTarget() === 'docker' && isDockerRuntimeAvailable()) {
-                try {
-                  chatId.set(storedMessages.id);
-                  const resume = await getDockerRuntime().resume(storedMessages.id);
-
-                  if (resume.hasFiles) {
-                    getDockerRuntime().setHydrateSkipWrites(true);
-                    includeFiles = false;
-                  }
-
-                  if (resume.preview?.ready) {
-                    includeSetup = false;
-                    includeStart = false;
-                    console.log('[ChatHistory] Docker session resumed with live preview');
-                  } else if (resume.hasNodeModules || resume.softStarted) {
-                    includeSetup = false;
-                    includeStart = !resume.softStarted;
-                    console.log('[ChatHistory] Docker session soft-started / deps present');
-                  }
-                } catch (error) {
-                  console.warn('[ChatHistory] Docker resume failed, falling back to cold restore', error);
-                }
-              }
-
-              const commandActionsString = createCommandActionsString(projectCommands, {
-                includeSetup,
-                includeStart,
-              });
-
-              filteredMessages = [
-                {
-                  id: generateId(),
-                  role: 'user',
-                  content: `Restore project from snapshot`, // Removed newline
-                  annotations: ['no-store', 'hidden'],
-                },
-                {
-                  id: storedMessages.messages[snapshotIndex].id,
-                  role: 'assistant',
-
-                  // Combine followup message and the artifact with files and command actions
-                  content: `${APP_NAME} restored your chat from a snapshot. You can revert this message to load the full chat history.
-                  <boltArtifact id="restored-project-setup" title="Restored Project & Setup" type="bundled">
-                  ${
-                    includeFiles
-                      ? Object.entries(snapshot?.files || {})
-                          .map(([key, value]) => {
-                            if (value?.type === 'file') {
-                              return `
-                      <boltAction type="file" filePath="${key}">
-${value.content}
-                      </boltAction>
-                      `;
-                            } else {
-                              return ``;
-                            }
-                          })
-                          .join('\n')
-                      : ''
-                  }
-                  ${commandActionsString} 
-                  </boltArtifact>
-                  `, // Added commandActionsString, followupMessage, updated id and title
-                  annotations: [
-                    'no-store',
-                    ...(summary
-                      ? [
-                          {
-                            chatId: storedMessages.messages[snapshotIndex].id,
-                            type: 'chatSummary',
-                            summary,
-                          } satisfies ContextAnnotation,
-                        ]
-                      : []),
-                  ],
-                },
-
-                // Remove the separate user and assistant messages for commands
-                /*
-                 *...(commands !== null // This block is no longer needed
-                 *  ? [ ... ]
-                 *  : []),
-                 */
-                ...filteredMessages,
-              ];
+            if (validSnapshot.chatIndex || Object.keys(validSnapshot.files || {}).length > 0) {
               restoreSnapshot(mixedId, validSnapshot);
-            } else if (getEffectiveExecutionTarget() === 'docker' && isDockerRuntimeAvailable()) {
-              chatId.set(storedMessages.id);
-              void getDockerRuntime()
-                .resume(storedMessages.id)
-                .then((resume) => {
-                  if (resume.hasFiles) {
-                    getDockerRuntime().setHydrateSkipWrites(true);
+            }
+
+            if (getEffectiveExecutionTarget() === 'docker' && isDockerRuntimeAvailable()) {
+              try {
+                chatId.set(storedMessages.id);
+                const runtime = getDockerRuntime();
+                const resume = await runtime.resume(storedMessages.id);
+
+                if (resume.hasFiles) {
+                  runtime.setHydrateSkipWrites(true);
+                } else {
+                  for (const [filePath, value] of Object.entries(validSnapshot.files || {})) {
+                    if (value?.type === 'file' && typeof value.content === 'string') {
+                      await runtime.writeFile(filePath.replace(/^\/home\/project\//, ''), value.content);
+                    }
                   }
-                })
-                .catch((error) => {
-                  console.warn('[ChatHistory] Docker resume skipped', error);
-                });
+                }
+              } catch (error) {
+                console.warn('[ChatHistory] Docker resume failed', error);
+              }
             }
 
             setInitialMessages(filteredMessages);
-
             setUrlId(storedMessages.urlId);
             description.set(storedMessages.description);
             chatId.set(storedMessages.id);
@@ -262,7 +174,7 @@ ${value.content}
             const live = recoverLiveChatSession(mixedId);
 
             if (live?.messages.length) {
-              setInitialMessages(live.messages);
+              setInitialMessages(withoutSyntheticSnapshotMessages(live.messages));
               chatId.set(live.chatId);
               setInterrupted(Boolean(live.streaming));
             } else if (initialMessages.length === 0) {
@@ -281,7 +193,7 @@ ${value.content}
           const live = recoverLiveChatSession(mixedId);
 
           if (live?.messages.length) {
-            setInitialMessages(live.messages);
+            setInitialMessages(withoutSyntheticSnapshotMessages(live.messages));
             chatId.set(live.chatId);
             setInterrupted(true);
           } else {
@@ -338,7 +250,7 @@ ${value.content}
   }, []);
 
   return {
-    ready: !mixedId || ready || initialMessages.length > 0,
+    ready: !mixedId || ready,
     initialMessages,
     interrupted,
     loadError,
@@ -346,7 +258,7 @@ ${value.content}
       const live = recoverLiveChatSession(mixedId);
 
       if (live?.messages.length) {
-        setInitialMessages(live.messages);
+        setInitialMessages(withoutSyntheticSnapshotMessages(live.messages));
         chatId.set(live.chatId);
         setInterrupted(Boolean(live.streaming));
         setLoadError(undefined);
@@ -379,7 +291,9 @@ ${value.content}
       }
 
       const { firstArtifact } = workbenchStore;
-      messages = messages.filter((m) => !m.annotations?.includes('no-store'));
+      messages = messages.filter(
+        (m) => !m.annotations?.includes('no-store') && !isSyntheticSnapshotMessage(m),
+      );
 
       let _urlId = urlId;
 

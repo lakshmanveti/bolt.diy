@@ -61,6 +61,11 @@ export function resetMessageParser() {
 export function useMessageParser() {
   const [parsedMessages, setParsedMessages] = useState<{ [key: number]: string }>({});
 
+  const resetParser = useCallback(() => {
+    resetMessageParser();
+    setParsedMessages({});
+  }, []);
+
   const parseMessages = useCallback((messages: Message[], _isLoading: boolean) => {
     /*
      * Do not reset the parser after every stream. In DEV the old reset
@@ -78,5 +83,5 @@ export function useMessageParser() {
     }
   }, []);
 
-  return { parsedMessages, parseMessages };
+  return { parsedMessages, parseMessages, resetParser };
 }

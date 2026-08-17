@@ -24,8 +24,8 @@ import xtermStyles from '@xterm/xterm/css/xterm.css?url';
 import 'virtual:uno.css';
 
 const toastAnimation = cssTransition({
-  enter: 'animated fadeInRight',
-  exit: 'animated fadeOutRight',
+  enter: 'animated fadeInDown',
+  exit: 'animated fadeOutUp',
 });
 
 export const links: LinksFunction = () => [
@@ -103,29 +103,42 @@ export function Layout({ children }: { children: React.ReactNode }) {
         )}
       </ClientOnly>
       <ToastContainer
-        closeButton={({ closeToast }) => {
-          return (
-            <button className="Toastify__close-button" onClick={closeToast}>
-              <div className="i-ph:x text-lg" />
-            </button>
-          );
-        }}
+        className="bl-toast-container"
+        toastClassName="bl-toast"
+        bodyClassName="bl-toast-body"
+        closeButton={({ closeToast }) => (
+          <button type="button" className="bl-toast-close" onClick={closeToast} aria-label="Dismiss">
+            <div className="i-ph:x" />
+          </button>
+        )}
         icon={({ type }) => {
           switch (type) {
             case 'success': {
-              return <div className="i-ph:check-bold text-bolt-elements-icon-success text-2xl" />;
+              return <div className="i-ph:check-circle text-accent-500 text-lg" />;
             }
             case 'error': {
-              return <div className="i-ph:warning-circle-bold text-bolt-elements-icon-error text-2xl" />;
+              return <div className="i-ph:warning-circle text-red-400 text-lg" />;
+            }
+            case 'warning': {
+              return <div className="i-ph:warning text-amber-400 text-lg" />;
+            }
+            case 'info': {
+              return <div className="i-ph:info text-bolt-elements-textSecondary text-lg" />;
+            }
+            default: {
+              return undefined;
             }
           }
-
-          return undefined;
         }}
-        position="bottom-right"
+        position="top-center"
+        hideProgressBar
+        newestOnTop
+        closeOnClick
         pauseOnFocusLoss
+        pauseOnHover
+        limit={3}
         transition={toastAnimation}
-        autoClose={3000}
+        autoClose={3200}
       />
       <ScrollRestoration />
       <Scripts />
