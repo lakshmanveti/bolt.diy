@@ -104,7 +104,7 @@ export function useAddBackendPrompt(isStreaming: boolean) {
   }, [currentChatId]);
 
   const openConnect = useCallback(() => {
-    openSettingsTab('supabase', { from: 'integrations' });
+    openSettingsTab('supabase', { intent: 'add-backend' });
   }, []);
 
   return {

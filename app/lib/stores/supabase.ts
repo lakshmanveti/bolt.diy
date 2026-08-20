@@ -163,15 +163,22 @@ export async function fetchSupabaseStats(token: string) {
     });
 
     if (!response.ok) {
-      throw new Error('Failed to fetch projects');
+      const err = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new Error(err.error || 'Failed to fetch projects');
     }
 
-    const data = (await response.json()) as any;
+    const data = (await response.json()) as {
+      user?: { email?: string; role?: string };
+      stats?: SupabaseStats;
+    };
 
     updateSupabaseConnection({
       user: data.user,
       stats: data.stats,
+      token,
     });
+
+    return data;
   } catch (error) {
     console.error('Failed to fetch Supabase stats:', error);
     throw error;

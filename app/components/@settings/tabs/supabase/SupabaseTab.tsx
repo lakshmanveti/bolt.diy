@@ -15,6 +15,11 @@ import {
   fetchProjectApiKeys,
   type SupabaseProject,
 } from '~/lib/stores/supabase';
+import {
+  closeSettingsTab,
+  requestAddBackendFollowup,
+  settingsModalIntentStore,
+} from '~/lib/stores/settings-modal';
 
 interface ConnectionTestResult {
   status: 'success' | 'error' | 'testing';
@@ -54,9 +59,11 @@ export default function SupabaseTab() {
   const connecting = useStore(isConnecting);
   const fetchingStats = useStore(isFetchingStats);
   const fetchingApiKeys = useStore(isFetchingApiKeys);
+  const modalIntent = useStore(settingsModalIntentStore);
+  const fromAddBackend = modalIntent === 'add-backend';
 
   const [tokenInput, setTokenInput] = useState(connection.token || '');
-  const [isProjectsExpanded, setIsProjectsExpanded] = useState(false);
+  const [isProjectsExpanded, setIsProjectsExpanded] = useState(fromAddBackend);
   const [connectionTest, setConnectionTest] = useState<ConnectionTestResult | null>(null);
   const [isProjectActionLoading, setIsProjectActionLoading] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
@@ -202,28 +209,90 @@ export default function SupabaseTab() {
     fetchProjects();
   }, [connection.user, connection.token]);
 
-  const handleConnect = async () => {
+  const handleTest = async () => {
     if (!tokenInput) {
-      toast.error('Please enter a Supabase access token');
+      setConnectionTest({
+        status: 'error',
+        message: 'Enter a Supabase access token first.',
+        timestamp: Date.now(),
+      });
       return;
     }
 
     isConnecting.set(true);
+    setConnectionTest({
+      status: 'testing',
+      message: 'Testing token…',
+      timestamp: Date.now(),
+    });
 
     try {
-      await fetchSupabaseStats(tokenInput);
-      updateSupabaseConnection({
-        token: tokenInput,
-        isConnected: true,
+      const data = await fetchSupabaseStats(tokenInput);
+      const projects = data.stats?.projects ?? [];
+      setIsProjectsExpanded(true);
+
+      let message = `Token works. Found ${projects.length} project${projects.length === 1 ? '' : 's'}.`;
+
+      if (projects.length === 1) {
+        message = `Token works. Found project “${projects[0].name}”.`;
+      }
+
+      setConnectionTest({
+        status: 'success',
+        message,
+        timestamp: Date.now(),
       });
-      toast.success('Successfully connected to Supabase');
-      setTokenInput('');
+
+      if (projects.length === 1) {
+        await handleProjectSelect(projects[0].id);
+      }
     } catch (error) {
       console.error('Auth error:', error);
-      toast.error('Failed to connect to Supabase');
-      updateSupabaseConnection({ user: null, token: '' });
+      setConnectionTest({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Failed to test this token.',
+        timestamp: Date.now(),
+      });
     } finally {
       isConnecting.set(false);
+    }
+  };
+
+  const handleUseProject = async () => {
+    const projectId = selectedProjectId || connection.selectedProjectId;
+    const token = connection.token || tokenInput;
+
+    if (!token) {
+      setConnectionTest({
+        status: 'error',
+        message: 'Test a token first.',
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    if (!projectId) {
+      setConnectionTest({
+        status: 'error',
+        message: 'Select a Supabase project, then use it in this app.',
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    try {
+      if (!connection.credentials) {
+        await fetchProjectApiKeys(projectId, token);
+      }
+
+      requestAddBackendFollowup();
+      closeSettingsTab();
+    } catch (error) {
+      setConnectionTest({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Could not load project API keys.',
+        timestamp: Date.now(),
+      });
     }
   };
 
@@ -258,11 +327,18 @@ export default function SupabaseTab() {
     setSelectedProjectId(projectId);
     updateSupabaseConnection({ selectedProjectId: projectId });
 
-    if (projectId && connection.token) {
+    const token = connection.token || tokenInput;
+
+    if (projectId && token) {
       try {
-        await fetchProjectApiKeys(projectId, connection.token);
+        await fetchProjectApiKeys(projectId, token);
       } catch (error) {
         console.error('Failed to fetch API keys:', error);
+        setConnectionTest({
+          status: 'error',
+          message: error instanceof Error ? error.message : 'Could not load project API keys.',
+          timestamp: Date.now(),
+        });
       }
     }
   };
@@ -720,7 +796,8 @@ export default function SupabaseTab() {
               </div>
 
               <button
-                onClick={handleConnect}
+                type="button"
+                onClick={handleTest}
                 disabled={connecting || !tokenInput}
                 className={classNames(
                   'px-4 py-2 rounded-lg text-sm flex items-center gap-2',
@@ -733,12 +810,12 @@ export default function SupabaseTab() {
                 {connecting ? (
                   <>
                     <div className="i-ph:spinner-gap animate-spin" />
-                    Connecting...
+                    Testing...
                   </>
                 ) : (
                   <>
-                    <div className="i-ph:plug-charging w-4 h-4" />
-                    Connect
+                    <div className="i-ph:plugs w-4 h-4" />
+                    Test
                   </>
                 )}
               </button>
@@ -1060,6 +1137,44 @@ export default function SupabaseTab() {
               {renderProjects()}
             </div>
           )}
+
+          {fromAddBackend ? (
+            <div className="space-y-2 border-t border-bolt-elements-borderColor pt-4">
+              <button
+                type="button"
+                onClick={handleUseProject}
+                disabled={
+                  fetchingApiKeys ||
+                  !connection.user ||
+                  !(selectedProjectId || connection.selectedProjectId)
+                }
+                className={classNames(
+                  'w-full px-4 py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2',
+                  'bg-accent-500 text-white hover:bg-accent-600',
+                  'disabled:opacity-50 disabled:cursor-not-allowed',
+                )}
+              >
+                {fetchingApiKeys ? (
+                  <>
+                    <div className="i-ph:spinner-gap animate-spin" />
+                    Loading project keys…
+                  </>
+                ) : (
+                  <>
+                    <div className="i-ph:check-circle w-4 h-4" />
+                    Use this project
+                  </>
+                )}
+              </button>
+              <p className="text-xs text-bolt-elements-textSecondary">
+                {!connection.user
+                  ? 'Test your token first, then use it to add Supabase to this app.'
+                  : !(selectedProjectId || connection.selectedProjectId)
+                    ? 'Select a project above, then continue.'
+                    : 'Adds Supabase to this app and returns to the conversation.'}
+              </p>
+            </div>
+          ) : null}
         </div>
       </motion.div>
     </div>

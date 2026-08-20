@@ -11,6 +11,7 @@ import {
   activeSettingsTabStore,
   closeSettingsTab,
   goBackSettingsTab,
+  settingsModalIntentStore,
   settingsModalReturnStore,
   type SettingsModalView,
 } from '~/lib/stores/settings-modal';
@@ -26,6 +27,7 @@ function isSettingsTab(view: SettingsModalView): view is TabType {
 export function SettingsTabModal() {
   const activeTab = useStore(activeSettingsTabStore);
   const returnTo = useStore(settingsModalReturnStore);
+  const intent = useStore(settingsModalIntentStore);
   const open = activeTab !== null;
   const { acknowledgeAllFeatures } = useFeatures();
   const { markAllAsRead } = useNotifications();
@@ -63,7 +65,9 @@ export function SettingsTabModal() {
   const title = isHub ? 'Integrations' : TAB_LABELS[activeTab];
   const description = isHub
     ? 'Connect GitHub, GitLab, Netlify, Vercel, and Supabase'
-    : TAB_DESCRIPTIONS[activeTab];
+    : intent === 'add-backend' && activeTab === 'supabase'
+      ? 'Test your token, pick a project, then use it in this app'
+      : TAB_DESCRIPTIONS[activeTab];
 
   return (
     <RadixDialog.Root open={open} onOpenChange={(next) => !next && closeSettingsTab()}>

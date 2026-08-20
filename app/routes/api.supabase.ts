@@ -20,7 +20,13 @@ export const action: ActionFunction = async ({ request }) => {
       const errorText = await projectsResponse.text();
       console.error('Projects fetch failed:', errorText);
 
-      return json({ error: 'Failed to fetch projects' }, { status: 401 });
+      const status = projectsResponse.status;
+      const message =
+        status === 401 || status === 403
+          ? 'Invalid access token. Create a new token in Supabase and try again.'
+          : 'Failed to fetch projects. Check the token and try again.';
+
+      return json({ error: message }, { status: 401 });
     }
 
     const projects = (await projectsResponse.json()) as SupabaseProject[];

@@ -28,6 +28,10 @@ import type { DesignScheme } from '~/types/design-scheme';
 import type { ElementInfo } from '~/components/workbench/Inspector';
 import type { ActionAlert, SupabaseAlert, DeployAlert, LlmErrorAlertType } from '~/types/actions';
 import { workbenchStore } from '~/lib/stores/workbench';
+import {
+  addBackendFollowupRequest,
+  consumeAddBackendFollowup,
+} from '~/lib/stores/settings-modal';
 import { ConsumerMessages } from './ConsumerMessages';
 import { AppPreview } from './AppPreview';
 import { HeadlessBoltTerminal } from './HeadlessBoltTerminal.client';
@@ -156,6 +160,7 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
     const stickToBottomRef = useRef(true);
     const [showJumpToLatest, setShowJumpToLatest] = useState(false);
     const addBackend = useAddBackendPrompt(Boolean(isStreaming));
+    const followupRequested = useStore(addBackendFollowupRequest);
 
     const handleAddBackend = useCallback(() => {
       if (!addBackend.connected) {
@@ -166,6 +171,16 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
       sendMessage?.({} as any, addBackend.followup);
       addBackend.complete();
     }, [addBackend, sendMessage]);
+
+    useEffect(() => {
+      if (!followupRequested) {
+        return;
+      }
+
+      consumeAddBackendFollowup();
+      sendMessage?.({} as any, addBackend.followup);
+      addBackend.complete();
+    }, [addBackend, followupRequested, sendMessage]);
 
     const scrollChatToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
       const el = chatScrollRef.current;
