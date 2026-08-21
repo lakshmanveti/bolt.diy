@@ -127,11 +127,11 @@ function buildHeadline({
   }
 
   if (waitingForRuntime) {
-    return 'Starting Docker…';
+    return 'Getting your app ready…';
   }
 
   if (showDockerStatus) {
-    return dockerTitle || 'Starting Docker…';
+    return dockerTitle || 'Getting your app ready…';
   }
 
   if (isRestore) {
@@ -227,7 +227,7 @@ function buildStatusLabel({
   }
 
   if (showDockerStatus || isRestore) {
-    return dockerTitle || 'Starting Docker…';
+    return dockerTitle || 'Getting your app ready…';
   }
 
   return currentLabel;

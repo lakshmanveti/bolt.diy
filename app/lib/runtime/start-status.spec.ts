@@ -34,6 +34,13 @@ describe('formatStartStatus', () => {
 
     expect(status.title).toBe('Installing react…');
   });
+
+  it('uses plain language for the workspace boot stage', () => {
+    const status = formatStartStatus({ stage: 'container' });
+
+    expect(status.title).toBe('Getting your app ready…');
+    expect(status.detail.toLowerCase()).not.toContain('docker');
+  });
 });
 
 describe('isLiveDockerStartStage', () => {

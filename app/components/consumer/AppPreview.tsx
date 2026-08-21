@@ -517,10 +517,10 @@ export const AppPreview = memo(
                 <p className="mt-1 text-xs text-bolt-elements-textSecondary">
                   {previewBusy
                     ? (SHOW_DOCKER_START_STATUS && startStatus.detail) ||
-                      'Preparing the live preview in Docker.'
+                      'Preparing the live preview.'
                     : previewHealth.message ||
                       (previewHealth.status === 'recovering'
-                        ? 'Restarting the app server in Docker.'
+                        ? 'Restarting the app.'
                         : 'The preview URL did not return a valid page.')}
                 </p>
                 {previewBusy && startElapsed > 0 ? (

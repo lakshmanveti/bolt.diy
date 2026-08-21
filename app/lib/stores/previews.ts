@@ -273,7 +273,7 @@ export class PreviewsStore {
       previewHealthStore.set({
         status: 'unreachable',
         autoRetryCount: 0,
-        message: 'Could not restart preview. Check Docker Desktop and the runtime daemon.',
+        message: 'Could not restart preview. Try Retry.',
       });
       return false;
     }

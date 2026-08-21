@@ -34,8 +34,8 @@ export function formatStartStatus(raw: {
   if (stage === 'container') {
     return {
       stage,
-      title: 'Starting Docker…',
-      detail: 'Booting a container for this app.',
+      title: 'Getting your app ready…',
+      detail: 'Preparing a workspace for this app.',
       startedAt,
     };
   }
@@ -69,7 +69,7 @@ export function formatStartStatus(raw: {
     return {
       stage,
       title: 'Couldn’t start the preview',
-      detail: raw.error || 'The app server did not come up. Check Docker Desktop and try Retry.',
+      detail: raw.error || 'The preview didn’t start. Try Retry.',
       startedAt,
     };
   }
