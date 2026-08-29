@@ -209,15 +209,3 @@ export async function supabaseDeleteSnapshot(chatId: string): Promise<void> {
     throw error;
   }
 }
-
-export async function supabaseGetNextId(): Promise<string | null> {
-  const chats = await supabaseGetAllChats();
-
-  if (!chats) {
-    return null;
-  }
-
-  const highestId = chats.reduce((max, chat) => Math.max(max, Number(chat.id) || 0), 0);
-
-  return String(highestId + 1);
-}

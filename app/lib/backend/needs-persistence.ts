@@ -93,3 +93,29 @@ export function projectNeedsPersistence(files: FileMap): boolean {
 
 export const ADD_BACKEND_FOLLOWUP =
   'Keep the current UI. Add Supabase so this app\'s forms and CRUD data persist. Create SQL migrations, wire @supabase/supabase-js using the connected project, add RLS policies, and do not rebuild the app from scratch.';
+
+export function isAddBackendRequest(text: string): boolean {
+  const value = text.trim();
+
+  if (!value) {
+    return false;
+  }
+
+  if (value.includes('Add Supabase so this app')) {
+    return true;
+  }
+
+  return /\badd (a )?backend\b/i.test(value) && /\bsupabase\b/i.test(value);
+}
+
+export function supabaseActionsAllowed(chatId: string | undefined, files: FileMap): boolean {
+  if (projectHasSupabaseBackend(files)) {
+    return true;
+  }
+
+  try {
+    return sessionStorage.getItem(`bl.add-backend:${chatId || 'default'}`) === 'completed';
+  } catch {
+    return false;
+  }
+}

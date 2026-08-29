@@ -10,6 +10,8 @@ import { createScopedLogger } from '~/utils/logger';
 import { createFilesContext, extractPropertiesFromMessage } from './utils';
 import { discussPrompt } from '~/lib/common/prompts/discuss-prompt';
 import type { DesignScheme } from '~/types/design-scheme';
+import { isAddBackendRequest, projectHasSupabaseBackend } from '~/lib/backend/needs-persistence';
+import type { FileMap as StoreFileMap } from '~/lib/stores/files';
 
 export type Messages = Message[];
 
@@ -49,6 +51,54 @@ function sanitizeText(text: string): string {
   sanitized = sanitized.replace(/<boltAction type="file" filePath="package-lock\.json">[\s\S]*?<\/boltAction>/g, '');
 
   return sanitized.trim();
+}
+
+function lastUserMessageText(messages: Omit<Message, 'id'>[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+
+    if (message.role !== 'user') {
+      continue;
+    }
+
+    if (typeof message.content === 'string' && message.content.trim()) {
+      return message.content;
+    }
+
+    if (Array.isArray(message.parts)) {
+      return message.parts
+        .filter((part): part is { type: 'text'; text: string } => part.type === 'text' && Boolean(part.text))
+        .map((part) => part.text)
+        .join('\n');
+    }
+
+    if (Array.isArray(message.content)) {
+      return message.content
+        .filter((part: { type?: string; text?: string }) => part.type === 'text' && Boolean(part.text))
+        .map((part: { text?: string }) => part.text || '')
+        .join('\n');
+    }
+  }
+
+  return '';
+}
+
+function supabasePromptOptions(options: StreamingOptions | undefined, lastUserText: string, files?: FileMap) {
+  const allowBackend =
+    isAddBackendRequest(lastUserText) || projectHasSupabaseBackend((files ?? {}) as StoreFileMap);
+
+  if (!allowBackend) {
+    return {
+      isConnected: false,
+      hasSelectedProject: false,
+    };
+  }
+
+  return {
+    isConnected: options?.supabaseConnection?.isConnected || false,
+    hasSelectedProject: options?.supabaseConnection?.hasSelectedProject || false,
+    credentials: options?.supabaseConnection?.credentials || undefined,
+  };
 }
 
 export async function streamText(props: {
@@ -155,11 +205,7 @@ export async function streamText(props: {
       allowedHtmlElements: allowedHTMLElements,
       modificationTagName: MODIFICATIONS_TAG_NAME,
       designScheme,
-      supabase: {
-        isConnected: options?.supabaseConnection?.isConnected || false,
-        hasSelectedProject: options?.supabaseConnection?.hasSelectedProject || false,
-        credentials: options?.supabaseConnection?.credentials || undefined,
-      },
+      supabase: supabasePromptOptions(options, lastUserMessageText(processedMessages), files),
     }) ?? getSystemPrompt();
 
   if (chatMode === 'build' && contextFiles && contextOptimization) {

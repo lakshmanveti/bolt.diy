@@ -31,11 +31,30 @@ export const VITE_REACT_PACKAGE_JSON = `{
 export const VITE_CONFIG = `import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+function jsAsJsx() {
+  return {
+    name: "buildlive-js-as-jsx",
+    enforce: "pre",
+    async transform(code, id) {
+      if (id.includes("node_modules")) return null;
+      const file = id.split("?")[0];
+      if (!file.endsWith(".js")) return null;
+      const { transformWithEsbuild } = await import("vite");
+      return transformWithEsbuild(code, file, { loader: "jsx", jsx: "automatic" });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [jsAsJsx(), react()],
   server: {
     host: "0.0.0.0",
     port: 5173,
+    watch: {
+      usePolling: true,
+      interval: 300,
+      awaitWriteFinish: { stabilityThreshold: 250, pollInterval: 100 },
+    },
   },
 });
 `;

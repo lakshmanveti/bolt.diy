@@ -106,6 +106,7 @@ function buildHeadline({
   waitingForRuntime,
   showDockerStatus,
   dockerTitle,
+  dockerStage,
   hasPreview,
   activeLabel,
   isStreaming,
@@ -116,6 +117,7 @@ function buildHeadline({
   waitingForRuntime: boolean;
   showDockerStatus: boolean;
   dockerTitle: string;
+  dockerStage: string;
   hasPreview: boolean;
   activeLabel?: string;
   isStreaming: boolean;
@@ -130,12 +132,16 @@ function buildHeadline({
     return 'Getting your app ready…';
   }
 
-  if (showDockerStatus) {
+  if (showDockerStatus && dockerStage !== 'ready' && dockerStage !== 'idle') {
     return dockerTitle || 'Getting your app ready…';
   }
 
-  if (isRestore) {
+  if (isRestore && !hasPreview) {
     return 'Loading your app';
+  }
+
+  if (showDockerStatus) {
+    return 'Connecting the preview…';
   }
 
   if (hasPreview && !activeLabel && !isStreaming) {
@@ -174,17 +180,15 @@ function buildDetail({
   waitingForRuntime,
   showDockerStatus,
   dockerDetail,
+  dockerTitle,
   isRestore,
-  doneCount,
-  itemCount,
 }: {
   error?: string;
   waitingForRuntime: boolean;
   showDockerStatus: boolean;
   dockerDetail: string;
+  dockerTitle: string;
   isRestore: boolean;
-  doneCount: number;
-  itemCount: number;
 }): string | null {
   if (error) {
     return error;
@@ -194,7 +198,7 @@ function buildDetail({
     return 'Hang on — this can take a minute the first time.';
   }
 
-  if (showDockerStatus && dockerDetail) {
+  if (showDockerStatus && dockerDetail && dockerDetail !== dockerTitle) {
     return dockerDetail;
   }
 
@@ -202,35 +206,32 @@ function buildDetail({
     return 'Reconnecting the live preview.';
   }
 
-  if (itemCount > 0) {
-    return `${doneCount} of ${itemCount} steps complete`;
-  }
-
   return null;
 }
 
-function buildStatusLabel({
-  error,
-  showDockerStatus,
-  isRestore,
-  dockerTitle,
-  currentLabel,
-}: {
-  error?: string;
-  showDockerStatus: boolean;
-  isRestore: boolean;
-  dockerTitle: string;
-  currentLabel?: string;
-}): string | undefined {
-  if (error) {
-    return 'Could not load your app';
+function dockerStageItems(status: { stage: string; packageName?: string }): ProgressItem[] {
+  if (status.stage === 'idle' || status.stage === 'ready') {
+    return [];
   }
 
-  if (showDockerStatus || isRestore) {
-    return dockerTitle || 'Getting your app ready…';
-  }
+  const pipeline: Array<{ id: string; label: string; stages: string[] }> = [
+    { id: 'container', label: 'Getting your app ready', stages: ['container', 'install', 'server', 'error'] },
+    {
+      id: 'install',
+      label: status.packageName ? `Installing ${status.packageName}` : 'Installing packages',
+      stages: ['install', 'server', 'error'],
+    },
+    { id: 'server', label: 'Starting the app', stages: ['server', 'error'] },
+  ];
 
-  return currentLabel;
+  const visible = pipeline.filter((step) => step.stages.includes(status.stage));
+  const currentId = status.stage === 'error' ? visible[visible.length - 1]?.id : status.stage;
+
+  return visible.map((step) => ({
+    id: `docker:${step.id}`,
+    label: step.label,
+    status: status.stage === 'error' && step.id === currentId ? 'failed' : step.id === currentId ? 'running' : 'complete',
+  }));
 }
 
 interface BuildProgressProps {
@@ -272,8 +273,6 @@ export const BuildProgress = memo(
 
     const latestAnnotation = [...annotations].sort((a, b) => b.order - a.order)[0];
     const active = items.find((i) => i.status === 'running' || i.status === 'pending');
-    const currentItem = active || items[items.length - 1];
-    const doneCount = items.filter((i) => i.status === 'complete').length;
     const awaitingPreviewRuntime =
       isStreaming ||
       items.length > 0 ||
@@ -287,6 +286,10 @@ export const BuildProgress = memo(
       !waitingForRuntime &&
       awaitingPreviewRuntime &&
       (isLiveDockerStartStage(startStatus.stage) || previewBusy || isRestore || (items.length > 0 && !active));
+    const dockerItems = showDockerStatus ? dockerStageItems(startStatus) : [];
+    const accordionItems = (items.length > 1 ? items : dockerItems).slice().reverse();
+    const showAccordion = accordionItems.length > 1;
+    const doneCount = accordionItems.filter((i) => i.status === 'complete').length;
     const isWaiting =
       Boolean(error) || waitingForRuntime || !hasPreview || Boolean(active) || isStreaming || previewBusy || isRestore;
     const buildReady = hasPreview && !active && !isStreaming && !showDockerStatus && !isRestore && !error;
@@ -300,6 +303,7 @@ export const BuildProgress = memo(
       waitingForRuntime,
       showDockerStatus,
       dockerTitle: startStatus.title,
+      dockerStage: startStatus.stage,
       hasPreview,
       activeLabel: active?.label,
       isStreaming,
@@ -312,23 +316,9 @@ export const BuildProgress = memo(
       waitingForRuntime,
       showDockerStatus,
       dockerDetail: startStatus.detail,
-      isRestore,
-      doneCount,
-      itemCount: items.length,
-    });
-    const statusLabel = buildStatusLabel({
-      error,
-      showDockerStatus,
-      isRestore,
       dockerTitle: startStatus.title,
-      currentLabel: currentItem?.label,
+      isRestore,
     });
-    const statusKind: ActionState['status'] | 'in-progress' | 'complete' =
-      error || startStatus.stage === 'error'
-        ? 'failed'
-        : showDockerStatus || isRestore || !currentItem
-          ? 'running'
-          : currentItem.status;
 
     const showEmpty =
       !isRestore && items.length === 0 && !latestAnnotation && !isStreaming && !hasPreview && !showDockerStatus;
@@ -373,34 +363,30 @@ export const BuildProgress = memo(
           )}
         </div>
 
-        {(statusLabel || error) && (
+        {showAccordion && (
           <div className="rounded-xl border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 overflow-hidden text-left">
-            <div className="flex items-center gap-3 px-4 py-3.5">
-              <StatusIcon status={statusKind} />
-              <span className="text-sm font-semibold text-bolt-elements-textPrimary flex-1 min-w-0 truncate">
-                {statusLabel || headline}
+            <button
+              type="button"
+              className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-bolt-elements-item-backgroundActive transition-colors"
+              onClick={() => setExpanded((v) => !v)}
+              aria-expanded={expanded}
+            >
+              <span className="text-sm font-medium text-bolt-elements-textSecondary flex-1">
+                {expanded ? 'Hide steps' : 'Show all steps'}
               </span>
-              {!isRestore && items.length > 1 && (
-                <button
-                  type="button"
-                  className="shrink-0 flex items-center justify-center w-8 h-8 rounded-md text-bolt-elements-textSecondary hover:text-bolt-elements-textPrimary hover:bg-bolt-elements-item-backgroundActive transition-colors"
-                  onClick={() => setExpanded((v) => !v)}
-                  aria-expanded={expanded}
-                  aria-label={expanded ? 'Hide all steps' : 'Show all steps'}
-                  title={expanded ? 'Hide all steps' : 'Show all steps'}
-                >
-                  {expanded ? (
-                    <div className="i-ph:caret-up-bold w-4 h-4" />
-                  ) : (
-                    <div className="i-ph:caret-down-bold w-4 h-4" />
-                  )}
-                </button>
+              <span className="text-xs text-bolt-elements-textTertiary">
+                {doneCount}/{accordionItems.length}
+              </span>
+              {expanded ? (
+                <div className="i-ph:caret-up-bold w-4 h-4 text-bolt-elements-textSecondary shrink-0" />
+              ) : (
+                <div className="i-ph:caret-down-bold w-4 h-4 text-bolt-elements-textSecondary shrink-0" />
               )}
-            </div>
+            </button>
 
-            {expanded && items.length > 1 && (
+            {expanded && (
               <ul className="border-t border-bolt-elements-borderColor max-h-56 overflow-y-auto modern-scrollbar">
-                {items.map((item) => (
+                {accordionItems.map((item) => (
                   <li
                     key={item.id}
                     className={classNames(
@@ -425,42 +411,42 @@ export const BuildProgress = memo(
                 ))}
               </ul>
             )}
-            {error && onRetry ? (
-              <div className="border-t border-bolt-elements-borderColor px-4 py-3">
-                <button
-                  type="button"
-                  onClick={onRetry}
-                  className="rounded-md bg-accent-500 px-4 py-2 text-sm font-medium text-white hover:bg-accent-600"
-                >
-                  Retry
-                </button>
-              </div>
-            ) : null}
           </div>
         )}
 
-        {SHOW_BUILD_ENGAGEMENT && isWaiting && !error && (
-          <div className="mt-5 space-y-4">
-            <div className="rounded-xl border border-bolt-elements-borderColor/80 bg-bolt-elements-background-depth-2/60 px-4 py-3 text-left">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-bolt-elements-textTertiary mb-1.5">
-                Tip
-              </p>
-              <p key={tip} className="text-sm text-bolt-elements-textSecondary leading-relaxed transition-opacity duration-300">
-                {tip}
-              </p>
-            </div>
+        {error && onRetry ? (
+          <div className="mt-4">
+            <button
+              type="button"
+              onClick={onRetry}
+              className="rounded-md bg-accent-500 px-4 py-2 text-sm font-medium text-white hover:bg-accent-600"
+            >
+              Retry
+            </button>
+          </div>
+        ) : null}
 
-            <div className="flex flex-wrap items-center justify-center gap-2 px-1">
-              <span className="inline-flex items-center rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-[11px] font-medium tracking-wide text-sky-300">
-                Watch preview appear
+        {SHOW_BUILD_ENGAGEMENT && isWaiting && !error && (
+          <div className="mt-5 space-y-3">
+            <p
+              key={tip}
+              className="text-xs text-bolt-elements-textTertiary leading-relaxed text-center transition-opacity duration-300"
+            >
+              <span className="font-medium text-bolt-elements-textTertiary">Tip · </span>
+              {tip}
+            </p>
+
+            <p className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 px-1 text-xs">
+              <span className="font-medium text-sky-600 dark:text-sky-400">Watch preview appear</span>
+              <span aria-hidden="true" className="text-bolt-elements-textTertiary/50">
+                ·
               </span>
-              <span className="inline-flex items-center rounded-full border border-violet-500/30 bg-violet-500/10 px-2.5 py-1 text-[11px] font-medium tracking-wide text-violet-300">
-                Tell chat what to change
+              <span className="font-medium text-violet-600 dark:text-violet-400">Tell chat what to change</span>
+              <span aria-hidden="true" className="text-bolt-elements-textTertiary/50">
+                ·
               </span>
-              <span className="inline-flex items-center rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-medium tracking-wide text-emerald-300">
-                Deploy when ready
-              </span>
-            </div>
+              <span className="font-medium text-emerald-600 dark:text-emerald-400">Deploy when ready</span>
+            </p>
           </div>
         )}
 

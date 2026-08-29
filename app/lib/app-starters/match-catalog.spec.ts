@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { matchCatalog, meaningfulExtras, snapCategoryToCatalog } from './match-catalog';
+import { seedSummaries } from './manifest';
 import type { TemplateSummary } from './types';
 
 const hello: TemplateSummary = {
@@ -7,6 +8,13 @@ const hello: TemplateSummary = {
   title: 'Hello world',
   description: 'generate a hello world app',
   keywords: ['hello world', 'hello world app'],
+};
+
+const budget: TemplateSummary = {
+  category: 'monthly_budget_planner',
+  title: 'Monthly Budget Planner',
+  description: 'Track monthly expenses, income, and remaining budget',
+  keywords: ['budget', 'expense tracker', 'monthly budget', 'planner', 'app', 'tracker'],
 };
 
 const catalog: TemplateSummary[] = [
@@ -17,6 +25,7 @@ const catalog: TemplateSummary[] = [
     description: 'todos',
     keywords: ['todo', 'task manager'],
   },
+  budget,
 ];
 
 describe('matchCatalog', () => {
@@ -28,6 +37,16 @@ describe('matchCatalog', () => {
 
   it('does not match an unrelated prompt', () => {
     expect(matchCatalog('purchase order management system', catalog)).toBeNull();
+  });
+
+  it('does not reuse a budget planner for a book reading tracker', () => {
+    expect(matchCatalog('build a Book Reading Tracker application', catalog)).toBeNull();
+  });
+
+  it('still reuses task_manager for a todo request', () => {
+    const match = matchCatalog('build a todo list for daily tasks', [...seedSummaries(), hello, budget]);
+
+    expect(match?.item.category).toBe('task_manager');
   });
 
   it('snaps hello_world_application onto hello_world', () => {

@@ -40,7 +40,7 @@ The year is 2025.
 <technology_preferences>
   - Use Vite for web servers
   - ALWAYS choose Node.js scripts over shell scripts
-  - Use Supabase for databases by default. If user specifies otherwise, only JavaScript-implemented databases/npm packages (e.g., libsql, sqlite) will work
+  - First generate is UI-only (React state or localStorage). Do NOT add Supabase or any backend unless the user explicitly asked to add a backend.
   - ${APP_NAME} ALWAYS uses stock photos from Pexels (valid URLs only). NEVER downloads images, only links to them.
 </technology_preferences>
 
@@ -54,18 +54,13 @@ The year is 2025.
 </running_shell_commands_info>
 
 <database_instructions>
-  CRITICAL: Use Supabase for databases by default, unless specified otherwise.
-  
-  Supabase project setup handled separately by user! ${
-    supabase
-      ? !supabase.isConnected
-        ? 'You are not connected to Supabase. Remind user to "connect to Supabase in chat box before proceeding".'
-        : !supabase.hasSelectedProject
-          ? 'Connected to Supabase but no project selected. Remind user to select project in chat box.'
-          : ''
-      : ''
-  }
-
+  CRITICAL: Do NOT add a backend on the first build.
+  - Ship a working UI with in-memory data or localStorage.
+  - FORBIDDEN unless the user explicitly asked to add a backend / persist with Supabase:
+    - <boltAction type="supabase" ...>
+    - SQL migrations, RLS policies, @supabase/supabase-js, VITE_SUPABASE_* env vars
+    - Asking the user to connect to Supabase
+  - BuildLive will offer "Add Backend" after the live preview is working.
 
   ${
     supabase?.isConnected &&
@@ -73,16 +68,9 @@ The year is 2025.
     supabase?.credentials?.supabaseUrl &&
     supabase?.credentials?.anonKey
       ? `
-    Create .env file if it doesn't exist${
-      supabase?.isConnected &&
-      supabase?.hasSelectedProject &&
-      supabase?.credentials?.supabaseUrl &&
-      supabase?.credentials?.anonKey
-        ? ` with:
+    The user asked to add Supabase (or this app already uses it). Create .env if needed with:
       VITE_SUPABASE_URL=${supabase.credentials.supabaseUrl}
-      VITE_SUPABASE_ANON_KEY=${supabase.credentials.anonKey}`
-        : '.'
-    }
+      VITE_SUPABASE_ANON_KEY=${supabase.credentials.anonKey}
     DATA PRESERVATION REQUIREMENTS:
       - DATA INTEGRITY IS HIGHEST PRIORITY - users must NEVER lose data
       - FORBIDDEN: Destructive operations (DROP, DELETE) that could cause data loss
@@ -103,38 +91,12 @@ The year is 2025.
         - Use default values: DEFAULT false/true, DEFAULT 0, DEFAULT '', DEFAULT now()
         - Start with markdown summary in multi-line comment explaining changes
         - Use IF EXISTS/IF NOT EXISTS for safe operations
-      
-      Example migration:
-      /*
-        # Create users table
-        1. New Tables: users (id uuid, email text, created_at timestamp)
-        2. Security: Enable RLS, add read policy for authenticated users
-      */
-      CREATE TABLE IF NOT EXISTS users (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        email text UNIQUE NOT NULL,
-        created_at timestamptz DEFAULT now()
-      );
-      ALTER TABLE users ENABLE ROW LEVEL SECURITY;
-      CREATE POLICY "Users read own data" ON users FOR SELECT TO authenticated USING (auth.uid() = id);
+        - Keep the current UI. Do not rebuild from scratch.
     
     Client Setup:
       - Use @supabase/supabase-js
       - Create singleton client instance
       - Use environment variables from .env
-    
-    Authentication:
-      - ALWAYS use email/password signup
-      - FORBIDDEN: magic links, social providers, SSO (unless explicitly stated)
-      - FORBIDDEN: custom auth systems, ALWAYS use Supabase's built-in auth
-      - Email confirmation ALWAYS disabled unless stated
-    
-    Security:
-      - ALWAYS enable RLS for every new table
-      - Create policies based on user authentication
-      - One migration per logical change
-      - Use descriptive policy names
-      - Add indexes for frequently queried columns
   `
       : ''
   }

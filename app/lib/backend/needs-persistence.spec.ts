@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { FileMap } from '~/lib/stores/files';
-import { projectHasSupabaseBackend, projectNeedsPersistence } from './needs-persistence';
+import {
+  ADD_BACKEND_FOLLOWUP,
+  isAddBackendRequest,
+  projectHasSupabaseBackend,
+  projectNeedsPersistence,
+  supabaseActionsAllowed,
+} from './needs-persistence';
 
 function files(entries: Record<string, string>): FileMap {
   return Object.fromEntries(
@@ -61,5 +67,28 @@ describe('needs-persistence', () => {
 
     expect(projectHasSupabaseBackend(map)).toBe(true);
     expect(projectNeedsPersistence(map)).toBe(false);
+  });
+
+  it('treats the Add Backend follow-up as an explicit backend request', () => {
+    expect(isAddBackendRequest(ADD_BACKEND_FOLLOWUP)).toBe(true);
+    expect(isAddBackendRequest('add a backend with supabase')).toBe(true);
+    expect(isAddBackendRequest('Build a todo app')).toBe(false);
+    expect(isAddBackendRequest('Create a contact form')).toBe(false);
+  });
+
+  it('blocks supabase actions until the app is wired or Add Backend completed', () => {
+    const uiOnly = files({
+      '/home/project/src/App.tsx': `export default function App() { return <h1>Hello</h1>; }`,
+    });
+
+    expect(supabaseActionsAllowed('chat-1', uiOnly)).toBe(false);
+    expect(
+      supabaseActionsAllowed(
+        'chat-1',
+        files({
+          '/home/project/src/lib/supabase.ts': `import { createClient } from '@supabase/supabase-js';`,
+        }),
+      ),
+    ).toBe(true);
   });
 });

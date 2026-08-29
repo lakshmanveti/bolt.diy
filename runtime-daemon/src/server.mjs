@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdir, writeFile, rm, access, readdir, copyFile, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, rm, access, readdir, copyFile, readFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -14,6 +14,7 @@ const PORT = Number(process.env.RUNTIME_DAEMON_PORT || 7788);
 const IMAGE = process.env.RUNTIME_DOCKER_IMAGE || 'node:22-bookworm';
 const CONTAINER_WORKDIR = '/home/project';
 const PREVIEW_PORTS = [5173, 3000, 4173, 8080, 5000, 4321];
+const START_LOG_FILENAME = '.buildlive-start.log';
 const STATIC_SERVER_FILENAME = '.buildlive-static-server.mjs';
 const STATIC_SERVER_TEMPLATE = path.join(__dirname, 'static-server.mjs');
 const INSPECTOR_SCRIPT_FILENAME = 'buildlive-inspector.js';
@@ -63,6 +64,13 @@ function registerSession(session) {
   if (session.chatId) {
     sessionsByChatId.set(session.chatId, session.id);
   }
+}
+
+function findSessionByChatId(chatKey) {
+  const sid =
+    sessionsByChatId.get(chatKey) || (sessions.has(sanitizeSessionId(chatKey)) ? sanitizeSessionId(chatKey) : null);
+
+  return sid ? sessions.get(sid) : null;
 }
 
 async function recoverSessionsFromDisk() {
@@ -372,12 +380,21 @@ async function dockerExec(session, command, { detach = false, timeoutMs } = {}) 
   return run('docker', args, timeoutMs ? { timeoutMs } : {});
 }
 
-async function resolvePreview(session) {
+async function ensureHostPorts(session, { refresh = false } = {}) {
   if (!session.containerId) {
-    return null;
+    return {};
   }
 
-  let fallback = null;
+  const cached =
+    session.hostPorts &&
+    session.hostPortsFor === session.containerId &&
+    Object.keys(session.hostPorts).length > 0;
+
+  if (cached && !refresh) {
+    return session.hostPorts;
+  }
+
+  const hostPorts = {};
 
   for (const containerPort of PREVIEW_PORTS) {
     const mapped = await run('docker', ['port', session.containerId, String(containerPort)]);
@@ -385,43 +402,93 @@ async function resolvePreview(session) {
       continue;
     }
 
-    // e.g. 127.0.0.1:52345
     const line = mapped.stdout.trim().split(/\r?\n/)[0] || '';
     const match = line.match(/:(\d+)\s*$/);
     if (!match) {
       continue;
     }
 
-    const hostPort = Number(match[1]);
+    hostPorts[containerPort] = Number(match[1]);
+  }
+
+  session.hostPorts = hostPorts;
+  session.hostPortsFor = session.containerId;
+  return hostPorts;
+}
+
+async function probePreviewOrigin(originUrl, timeoutMs = 2000) {
+  try {
+    const res = await fetch(originUrl, { signal: AbortSignal.timeout(timeoutMs) });
+    return res.ok || (res.status >= 300 && res.status < 400);
+  } catch {
+    return false;
+  }
+}
+
+async function resolvePreviewNow(session, { force = false } = {}) {
+  if (!session.containerId) {
+    return null;
+  }
+
+  const stage = session.startStatus?.stage;
+  const age = Date.now() - (session.startStatus?.startedAt || 0);
+
+  // Only skip during early npm install. Never skip for "container" — resume used to
+  // set that stage and then could not see an already-running Vite.
+  if (!force && stage === 'install' && age < 15_000) {
+    return session.preview || null;
+  }
+
+  if (!force && session.preview?.ready && session.previewProbedAt && Date.now() - session.previewProbedAt < 4000) {
+    return session.preview;
+  }
+
+  const hostPorts = await ensureHostPorts(session, {
+    refresh: force || !session.preview?.ready,
+  });
+  const preferred = [5173, ...PREVIEW_PORTS.filter((port) => port !== 5173)];
+  let fallback = null;
+
+  for (const containerPort of preferred) {
+    const hostPort = hostPorts[containerPort];
+    if (!hostPort) {
+      continue;
+    }
+
     const originUrl = `http://127.0.0.1:${hostPort}`;
-    // Direct host URL (not /embed/...) so Vite absolute paths like /@react-refresh work.
-    // Servers must send Cross-Origin-Resource-Policy: cross-origin for COEP iframes.
     const url = `${originUrl}/`;
     const candidate = { port: containerPort, hostPort, originUrl, url, ready: false };
-
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 800);
-      const res = await fetch(originUrl, { signal: controller.signal });
-      clearTimeout(timer);
-
-      // Treat only successful/redirect HTTP responses as preview-ready.
-      // A 404 at "/" usually means the app server is not serving a web UI yet.
-      if (res.ok || (res.status >= 300 && res.status < 400)) {
-        session.preview = { ...candidate, ready: true };
-        return session.preview;
-      }
-    } catch {
-      // not ready yet
-    }
 
     if (!fallback) {
       fallback = candidate;
     }
+
+    if (await probePreviewOrigin(originUrl, force ? 2000 : 800)) {
+      session.preview = { ...candidate, ready: true };
+      session.previewProbedAt = Date.now();
+      return session.preview;
+    }
+
+    if (containerPort === 5173 && hostPorts[5173] && !force && stage !== 'ready') {
+      break;
+    }
   }
 
   session.preview = fallback;
+  session.previewProbedAt = Date.now();
   return session.preview;
+}
+
+async function resolvePreview(session, options = {}) {
+  if (session.previewResolveInflight) {
+    return session.previewResolveInflight;
+  }
+
+  session.previewResolveInflight = resolvePreviewNow(session, options).finally(() => {
+    session.previewResolveInflight = undefined;
+  });
+
+  return session.previewResolveInflight;
 }
 
 function proxyHeaders() {
@@ -611,6 +678,66 @@ async function pathExistsInSession(session, relPath) {
   }
 }
 
+const SESSION_SCAFFOLD_NAMES = new Set([
+  SESSION_META_FILENAME,
+  STATIC_SERVER_FILENAME,
+  INSPECTOR_SCRIPT_FILENAME,
+  'public',
+]);
+
+/** True when the workdir has generated app files, not only daemon scaffold. */
+async function sessionHasAppFiles(session) {
+  async function walk(dir, depth) {
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name === '.git') {
+        continue;
+      }
+
+      if (depth === 0 && SESSION_SCAFFOLD_NAMES.has(entry.name)) {
+        if (entry.isDirectory() && entry.name === 'public') {
+          if (await walk(path.join(dir, entry.name), depth + 1)) {
+            return true;
+          }
+        }
+        continue;
+      }
+
+      if (entry.name === INSPECTOR_SCRIPT_FILENAME) {
+        continue;
+      }
+
+      if (entry.isFile()) {
+        return true;
+      }
+
+      if (entry.isDirectory() && depth < 4 && (await walk(path.join(dir, entry.name), depth + 1))) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  return walk(session.workdir, 0);
+}
+
+async function pruneEmptySessions() {
+  const removed = [];
+
+  for (const session of [...sessions.values()]) {
+    if (await sessionHasAppFiles(session)) {
+      continue;
+    }
+
+    await destroySession(session);
+    removed.push(session.id);
+  }
+
+  return removed;
+}
+
 function isStaticSiteCommand(command) {
   return (
     command.includes(STATIC_SERVER_FILENAME) ||
@@ -646,6 +773,72 @@ async function sessionHasJsxOrTsx(session) {
   return files.some((f) => /\.(jsx|tsx)$/i.test(f));
 }
 
+function viteConfigSource() {
+  return `import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+function buildliveInspector() {
+  return {
+    name: 'buildlive-inspector',
+    transformIndexHtml(html) {
+      if (html.includes('buildlive-inspector') || html.includes('INSPECTOR_READY')) {
+        return html;
+      }
+      const tag = '<script src="/${INSPECTOR_SCRIPT_FILENAME}"></script>';
+      if (/<\\/body>/i.test(html)) {
+        return html.replace(/<\\/body>/i, tag + '</body>');
+      }
+      return html + '\\n' + tag;
+    },
+  };
+}
+
+/** LLMs often put JSX in .js files; Vite import-analysis rejects that unless we treat .js as JSX. */
+function jsAsJsx() {
+  return {
+    name: 'buildlive-js-as-jsx',
+    enforce: 'pre',
+    async transform(code, id) {
+      if (id.includes('node_modules')) {
+        return null;
+      }
+      const file = id.split('?')[0];
+      if (!file.endsWith('.js')) {
+        return null;
+      }
+      const { transformWithEsbuild } = await import('vite');
+      return transformWithEsbuild(code, file, { loader: 'jsx', jsx: 'automatic' });
+    },
+  };
+}
+
+export default defineConfig({
+  plugins: [jsAsJsx(), react(), buildliveInspector()],
+  server: {
+    host: '0.0.0.0',
+    port: 5173,
+    strictPort: true,
+    hmr: false,
+    watch: {
+      usePolling: true,
+      interval: 300,
+      ignored: ['**/*.bltmp', '**/.buildlive-tmp/**'],
+      awaitWriteFinish: {
+        stabilityThreshold: 250,
+        pollInterval: 100,
+      },
+    },
+    headers: {
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
+      Pragma: 'no-cache',
+    },
+  },
+});
+`;
+}
+
 function injectInspectorHtml(html) {
   if (html.includes('buildlive-inspector') || html.includes('INSPECTOR_READY')) {
     return html;
@@ -671,6 +864,19 @@ async function copyFileIfMissing(src, dest) {
   }
 }
 
+async function atomicWriteFile(filePath, data) {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.bltmp`;
+  await writeFile(tmp, data);
+
+  try {
+    await rename(tmp, filePath);
+  } catch {
+    await writeFile(filePath, data);
+    await rm(tmp, { force: true }).catch(() => undefined);
+  }
+}
+
 async function writeFileIfChanged(filePath, content) {
   try {
     const existing = await readFile(filePath, 'utf8');
@@ -681,18 +887,15 @@ async function writeFileIfChanged(filePath, content) {
     // missing
   }
 
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, content, 'utf8');
+  await atomicWriteFile(filePath, content);
   return true;
 }
 
 /** Copy inspector into the app so Docker previews get click-to-select (WC uses setPreviewScript). */
 async function ensureInspectorAssets(session) {
-  await copyFileIfMissing(INSPECTOR_SCRIPT_TEMPLATE, path.join(session.workdir, INSPECTOR_SCRIPT_FILENAME));
-  await copyFileIfMissing(
-    INSPECTOR_SCRIPT_TEMPLATE,
-    path.join(session.workdir, 'public', INSPECTOR_SCRIPT_FILENAME),
-  );
+  await mkdir(path.join(session.workdir, 'public'), { recursive: true });
+  await copyFile(INSPECTOR_SCRIPT_TEMPLATE, path.join(session.workdir, INSPECTOR_SCRIPT_FILENAME));
+  await copyFile(INSPECTOR_SCRIPT_TEMPLATE, path.join(session.workdir, 'public', INSPECTOR_SCRIPT_FILENAME));
 
   const indexPath = path.join(session.workdir, 'index.html');
 
@@ -741,68 +944,20 @@ async function ensureViteReactScaffold(session) {
 
   // Write vite.config only when missing/changed — rewriting it restarts Vite and reloads the iframe.
   // Do not use path-based proxies with Vite (breaks /@react-refresh and /node_modules/*).
-  await writeFileIfChanged(
-    path.join(session.workdir, 'vite.config.js'),
-    `import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-
-function buildliveInspector() {
-  return {
-    name: 'buildlive-inspector',
-    transformIndexHtml(html) {
-      if (html.includes('buildlive-inspector') || html.includes('INSPECTOR_READY')) {
-        return html;
-      }
-      const tag = '<script src="/${INSPECTOR_SCRIPT_FILENAME}"></script>';
-      if (/<\\/body>/i.test(html)) {
-        return html.replace(/<\\/body>/i, tag + '</body>');
-      }
-      return html + '\\n' + tag;
-    },
-  };
-}
-
-export default defineConfig({
-  plugins: [react(), buildliveInspector()],
-  server: {
-    host: '0.0.0.0',
-    port: 5173,
-    strictPort: true,
-    hmr: false,
-    watch: {
-      usePolling: true,
-      interval: 300,
-    },
-    headers: {
-      'Cross-Origin-Resource-Policy': 'cross-origin',
-      'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'no-store, no-cache, must-revalidate',
-      Pragma: 'no-cache',
-    },
-  },
-});
-`,
-  );
+  await writeFileIfChanged(path.join(session.workdir, 'vite.config.js'), viteConfigSource());
 
   const hasAppTsx = await pathExistsInSession(session, 'src/App.tsx');
   const hasAppJsx = await pathExistsInSession(session, 'src/App.jsx');
   const hasMainTsx = await pathExistsInSession(session, 'src/main.tsx');
   const hasMainJsx = await pathExistsInSession(session, 'src/main.jsx');
   const hasIndexHtml = await pathExistsInSession(session, 'index.html');
+  const hasNodeModules = await pathExistsInSession(session, 'node_modules');
 
   if (!hasAppTsx && !hasAppJsx) {
-    await writeFileIfChanged(
-      path.join(session.workdir, 'src', 'App.jsx'),
-      `export default function App() {
-  return (
-    <main style={{ fontFamily: 'system-ui, sans-serif', padding: 24 }}>
-      <h1>Hello from BuildLive</h1>
-      <p>Your app preview is running in Docker.</p>
-    </main>
-  );
-}
-`,
-    );
+    // Do not invent a placeholder App — empty sessions must wait for generated files.
+    return hasNodeModules
+      ? 'npm run dev -- --host 0.0.0.0 --port 5173'
+      : 'npm install && npm run dev -- --host 0.0.0.0 --port 5173';
   }
 
   if (!hasMainTsx && !hasMainJsx) {
@@ -840,7 +995,6 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     );
   }
 
-  const hasNodeModules = await pathExistsInSession(session, 'node_modules');
   if (hasNodeModules) {
     return 'npm run dev -- --host 0.0.0.0 --port 5173';
   }
@@ -891,33 +1045,65 @@ function setStartStatus(session, patch) {
 }
 
 async function refreshStartStatusFromLog(session) {
-  const log = await readStartLog(session);
-  const parsed = parseStartLog(log);
-
-  if (parsed.logLength === 0 && session.startStatus?.stage) {
-    return session.startStatus;
+  if (session.startLogInflight) {
+    return session.startLogInflight;
   }
 
-  setStartStatus(session, {
-    stage: parsed.stage,
-    packageName: parsed.packageName,
-    packagesAdded: parsed.packagesAdded,
-    error: parsed.error,
-    logLength: parsed.logLength,
+  session.startLogInflight = (async () => {
+    const log = await readStartLog(session);
+    const parsed = parseStartLog(log);
+
+    if (parsed.logLength === 0 && session.startStatus?.stage) {
+      return session.startStatus;
+    }
+
+    setStartStatus(session, {
+      stage: parsed.stage,
+      packageName: parsed.packageName,
+      packagesAdded: parsed.packagesAdded,
+      error: parsed.error,
+      logLength: parsed.logLength,
+    });
+
+    return session.startStatus;
+  })().finally(() => {
+    session.startLogInflight = undefined;
   });
 
-  return session.startStatus;
+  return session.startLogInflight;
 }
 
 async function startCommand(session, command) {
-  const wrapped = `nohup bash -lc ${JSON.stringify(command)} > /tmp/buildlive-start.log 2>&1 &`;
+  const logPath = path.posix.join(CONTAINER_WORKDIR, START_LOG_FILENAME);
+  const wrapped = `nohup bash -lc ${JSON.stringify(command)} > ${logPath} 2>&1 &`;
   return dockerExec(session, wrapped, { detach: false });
 }
 
 async function readStartLog(session) {
-  const result = await dockerExec(session, 'tail -n 120 /tmp/buildlive-start.log 2>/dev/null || true', {
-    timeoutMs: 12_000,
-  });
+  try {
+    const text = await readFile(path.join(session.workdir, START_LOG_FILENAME), 'utf8');
+    const lines = text.split(/\r?\n/);
+    const sliced = lines.slice(-120).join('\n').trim();
+
+    if (sliced) {
+      return sliced;
+    }
+  } catch {
+    // bind-mount file not created yet
+  }
+
+  const age = Date.now() - (session.startStatus?.startedAt || 0);
+
+  if (age < 8_000) {
+    return '';
+  }
+
+  const result = await dockerExec(
+    session,
+    `tail -n 120 ${JSON.stringify(`${CONTAINER_WORKDIR}/${START_LOG_FILENAME}`)} /tmp/buildlive-start.log 2>/dev/null || true`,
+    { timeoutMs: 3_000 },
+  );
+
   return (result.stdout || '').trim();
 }
 
@@ -939,6 +1125,14 @@ async function waitForPreview(session, attempts = 30, delayMs = 700) {
       idleRounds += 1;
     }
 
+    // Don't docker-port/HTTP-probe while npm is still installing.
+    if (status?.stage === 'install' || status?.stage === 'container') {
+      if (status?.stage === 'install' && idleRounds < 25 && i >= attempts - 2 && attempts < hardMax) {
+        attempts += 1;
+      }
+      continue;
+    }
+
     preview = await resolvePreview(session);
     if (preview?.ready) {
       setStartStatus(session, { stage: 'ready', error: null });
@@ -953,7 +1147,15 @@ async function waitForPreview(session, attempts = 30, delayMs = 700) {
   return preview;
 }
 
+function invalidatePreview(session) {
+  session.previewProbedAt = 0;
+  if (session.preview) {
+    session.preview = { ...session.preview, ready: false };
+  }
+}
+
 async function stopAppProcesses(session) {
+  invalidatePreview(session);
   await dockerExec(session, "bash -lc 'pkill -9 -f \"vite|next|react-scripts|buildlive-static-server|http.server\" 2>/dev/null || true'");
   await dockerExec(session, "bash -lc 'pkill -9 -x node 2>/dev/null || true'");
   await dockerExec(session, "bash -lc 'for p in 5173 3000 4173 8080 5000 4321; do (command -v fuser >/dev/null 2>&1 && fuser -k ${p}/tcp >/dev/null 2>&1) || true; done'");
@@ -978,17 +1180,18 @@ async function restartSession(session) {
   }
 
   await stopAppProcesses(session);
+  await writeFileIfChanged(path.join(session.workdir, 'vite.config.js'), viteConfigSource());
   setStartStatus(session, { stage: 'server', startedAt: Date.now(), error: null });
-  // Flush host bind-mount writes into the container before Node boots
+  // Flush host bind-mount writes into the container before Node boots (Windows Docker can lag).
   await dockerExec(session, 'sync || true');
+  await dockerExec(session, 'sleep 0.5');
   await startCommand(session, command);
-
-  const waitAttempts = /npm install|vite/.test(command) ? 40 : 20;
-  const preview = await waitForPreview(session, waitAttempts, 500);
   session.lastCommand = command;
+  const preview = await waitForPreview(session, 8, 400);
 
   return {
-    ok: Boolean(preview?.ready),
+    ok: true,
+    pending: !preview?.ready,
     command,
     preview,
   };
@@ -1058,6 +1261,33 @@ async function destroySession(session) {
 
   sessionsByChatId.delete(session.chatId);
   sessions.delete(session.id);
+  console.log(`[runtime-daemon] destroyed session ${session.id}`);
+}
+
+async function destroySessionByChatId(chatKey) {
+  let session = findSessionByChatId(chatKey);
+
+  if (!session) {
+    const id = sanitizeSessionId(chatKey);
+    const workdir = path.join(SESSIONS_DIR, id);
+
+    try {
+      await access(workdir);
+      session = {
+        id,
+        chatId: chatKey || id,
+        workdir,
+        containerName: containerNameFor(id),
+      };
+      registerSession(session);
+    } catch {
+      return { destroyed: false, id: null };
+    }
+  }
+
+  const { id } = session;
+  await destroySession(session);
+  return { destroyed: true, id };
 }
 
 async function softStartSession(session) {
@@ -1097,25 +1327,22 @@ async function softStartSession(session) {
   await stopAppProcesses(session);
   await startCommand(session, command);
   session.lastCommand = command;
-  const waitAttempts = needsInstall ? 480 : /vite/.test(command) ? 90 : 20;
-  const preview = await waitForPreview(session, waitAttempts, 1000);
+  const preview = await waitForPreview(session, 24, 500);
   return { command, preview };
 }
 
 /**
  * Attach to an existing project: return live preview if up, otherwise soft-start.
+ * This is what a chat page reload does — first-generate waits should use the same path.
  */
 async function resumeSession(session) {
-  setStartStatus(session, { stage: 'container', startedAt: Date.now(), error: null });
   await ensureSessionContainer(session);
 
   const hasNodeModules = await pathExistsInSession(session, 'node_modules');
-  const hasFiles = (await readdir(session.workdir).catch(() => [])).some(
-    (name) => name !== SESSION_META_FILENAME && name !== STATIC_SERVER_FILENAME && name !== INSPECTOR_SCRIPT_FILENAME,
-  );
+  const hasFiles = await sessionHasAppFiles(session);
 
-  // If the app is already serving, do not touch files (Vite restarts on any write).
-  let preview = await resolvePreview(session);
+  // Force an HTTP probe even if start-status still says "server" / "container".
+  let preview = await resolvePreview(session, { force: true });
 
   if (preview?.ready) {
     setStartStatus(session, { stage: 'ready', error: null });
@@ -1173,11 +1400,22 @@ const server = createServer(async (req, res) => {
 
     if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
       const docker = await dockerAvailable();
-      const sessionList = [...sessions.values()].map((s) => ({
-        id: s.id,
-        chatId: s.chatId,
-        preview: s.preview || null,
-      }));
+      const sessionList = [];
+      let emptyCount = 0;
+
+      for (const s of sessions.values()) {
+        const hasApp = await sessionHasAppFiles(s);
+        if (!hasApp) {
+          emptyCount += 1;
+        }
+        sessionList.push({
+          id: s.id,
+          chatId: s.chatId,
+          preview: s.preview || null,
+          empty: !hasApp,
+        });
+      }
+
       const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -1188,10 +1426,11 @@ const server = createServer(async (req, res) => {
     :root { color-scheme: dark light; font-family: ui-sans-serif, system-ui, sans-serif; }
     body { max-width: 44rem; margin: 3rem auto; padding: 0 1.25rem; line-height: 1.5; }
     code { background: rgba(127,127,127,.15); padding: .1rem .35rem; border-radius: .25rem; }
-    .ok { color: #16a34a; } .bad { color: #dc2626; }
+    .ok { color: #16a34a; } .bad { color: #dc2626; } .muted { color: #888; }
     ul { padding-left: 1.2rem; }
     table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: 0.9rem; }
     th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid rgba(127,127,127,.25); }
+    button { cursor: pointer; padding: 0.4rem 0.75rem; border-radius: 0.35rem; }
   </style>
 </head>
 <body>
@@ -1202,8 +1441,12 @@ const server = createServer(async (req, res) => {
     <li>Health: <a href="/health"><code>/health</code></a></li>
     <li>Listening: <code>http://${HOST}:${PORT}</code></li>
     <li>Image: <code>${IMAGE}</code></li>
-    <li>Active sessions: <code>${sessions.size}</code></li>
+    <li>Sessions on disk: <code>${sessions.size}</code> (${emptyCount} empty)</li>
   </ul>
+  <p class="muted">A row with preview “—” is usually a <em>cold</em> session (files on disk, container not running). Empty means no generated app files — only daemon scaffold.</p>
+  <p>
+    <button type="button" id="prune-empty">Remove empty sessions</button>
+  </p>
   <h2>Sessions</h2>
   ${
     sessionList.length === 0
@@ -1212,13 +1455,28 @@ const server = createServer(async (req, res) => {
           .map((s) => {
             const preview = s.preview?.ready
               ? `<a href="${s.preview.url}" target="_blank" rel="noreferrer">${s.preview.url}</a>`
-              : s.preview?.url
-                ? `${s.preview.url} (starting…)`
-                : '—';
+              : s.empty
+                ? '<span class="muted">empty</span>'
+                : '<span class="muted">on disk</span>';
             return `<tr><td><code>${s.id.slice(0, 8)}</code></td><td>${preview}</td></tr>`;
           })
           .join('')}</tbody></table>`
   }
+  <script>
+    document.getElementById('prune-empty')?.addEventListener('click', async () => {
+      const button = document.getElementById('prune-empty');
+      button.disabled = true;
+      try {
+        const res = await fetch('/sessions/prune-empty', { method: 'POST' });
+        const data = await res.json();
+        alert('Removed ' + (data.count || 0) + ' empty session(s)');
+        location.reload();
+      } catch (err) {
+        alert('Prune failed');
+        button.disabled = false;
+      }
+    });
+  </script>
 </body>
 </html>`;
       res.writeHead(200, {
@@ -1261,6 +1519,13 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'POST' && pathname === '/sessions/prune-empty') {
+      const removed = await pruneEmptySessions();
+      console.log(`[runtime-daemon] pruned ${removed.length} empty session(s)`);
+      json(res, 200, { ok: true, removed, count: removed.length });
+      return;
+    }
+
     if (req.method === 'POST' && pathname === '/sessions') {
       const body = await readBody(req);
       if (!(await dockerAvailable())) {
@@ -1281,12 +1546,18 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // GET /sessions/by-chat/:chatId — lookup without creating
+    // GET|DELETE /sessions/by-chat/:chatId — lookup / destroy without creating
     const byChatMatch = pathname.match(/^\/sessions\/by-chat\/([^/]+)$/);
-    if (byChatMatch && req.method === 'GET') {
+    if (byChatMatch && (req.method === 'GET' || req.method === 'DELETE')) {
       const chatKey = decodeURIComponent(byChatMatch[1]);
-      const sid = sessionsByChatId.get(chatKey) || (sessions.has(sanitizeSessionId(chatKey)) ? sanitizeSessionId(chatKey) : null);
-      const session = sid ? sessions.get(sid) : null;
+
+      if (req.method === 'DELETE') {
+        const result = await destroySessionByChatId(chatKey);
+        json(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      const session = findSessionByChatId(chatKey);
 
       if (!session) {
         json(res, 404, { error: 'Session not found for chat' });
@@ -1343,15 +1614,11 @@ const server = createServer(async (req, res) => {
       for (const [relPath, content] of Object.entries(files)) {
         const normalized = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '');
         const abs = path.join(session.workdir, normalized);
-        await mkdir(path.dirname(abs), { recursive: true });
         const data =
           typeof content === 'string'
             ? content
-            : Buffer.from(
-                content.data || '',
-                content.encoding === 'base64' ? 'base64' : 'utf8',
-              );
-        await writeFile(abs, data);
+            : Buffer.from(content.data || '', content.encoding === 'base64' ? 'base64' : 'utf8');
+        await atomicWriteFile(abs, data);
       }
 
       // Ensure container exists so volume is mounted
@@ -1443,45 +1710,30 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      // First npm install on Windows Docker is often several minutes.
-      const waitAttempts = needsInstall ? 480 : /vite/.test(command) ? 90 : 20;
-      let preview = await waitForPreview(session, waitAttempts, 1000);
-
-      // Failed start: try an alternate runner (e.g. static → vite or npm → static)
-      if (!preview?.ready) {
-        const fallback = await chooseFallbackStart(session);
-        if (fallback && fallback !== command) {
-          console.log(`[runtime-daemon] fallback start session=${session.id} cmd=${fallback}`);
-          await stopAppProcesses(session);
-          await startCommand(session, withInstallProgress(fallback));
-          command = withInstallProgress(fallback);
-          const fallbackAttempts = /\bnpm install\b/.test(command) ? 480 : /vite/.test(command) ? 90 : 20;
-          preview = await waitForPreview(session, fallbackAttempts, 1000);
-        }
-      }
+      // Return immediately. Client waits on GET /start-status (host log) then one GET /preview.
+      let preview = await waitForPreview(session, 8, 400);
 
       if (!preview?.ready) {
         const log = await readStartLog(session);
         const parsed = parseStartLog(log);
-        setStartStatus(session, {
-          stage: 'error',
-          error: parsed.error || 'The preview server did not become ready.',
-        });
-        json(res, 500, {
-          error: 'Preview server did not become ready',
-          command,
-          output: log || 'No server process responded on mapped ports. Check start command / package.json.',
-          preview,
-        });
-        return;
+        const fallback = await chooseFallbackStart(session);
+
+        if (parsed.error && fallback && fallback !== command) {
+          console.log(`[runtime-daemon] fallback start session=${session.id} cmd=${fallback}`);
+          await stopAppProcesses(session);
+          command = withInstallProgress(fallback);
+          await startCommand(session, command);
+          preview = await waitForPreview(session, 8, 400);
+        }
       }
 
+      session.lastCommand = command;
       json(res, 200, {
         ok: true,
+        pending: !preview?.ready,
         command,
-        preview,
+        preview: preview || null,
       });
-      session.lastCommand = command;
       return;
     }
 
@@ -1512,7 +1764,18 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && action === 'preview') {
-      const preview = await resolvePreview(session);
+      await refreshStartStatusFromLog(session).catch(() => undefined);
+      const stage = session.startStatus?.stage;
+      const startedAt = session.startStatus?.startedAt || 0;
+      const earlyInstall = stage === 'install' && Date.now() - startedAt < 15_000;
+
+      if (earlyInstall) {
+        json(res, 200, { preview: session.preview || null });
+        return;
+      }
+
+      const force = stage === 'server' || stage === 'ready' || stage === 'error' || stage === 'container';
+      const preview = await resolvePreview(session, { force });
       json(res, 200, { preview });
       return;
     }

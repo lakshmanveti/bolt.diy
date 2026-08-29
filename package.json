@@ -29,6 +29,7 @@
     "typegen": "wrangler types",
     "runtime:daemon": "node runtime-daemon/src/server.mjs",
     "runtime:daemon:dev": "node --watch runtime-daemon/src/server.mjs",
+    "runtime:prune-empty": "node -e \"fetch('http://127.0.0.1:7788/sessions/prune-empty',{method:'POST'}).then(async r=>{const d=await r.json();console.log(d);}).catch(()=>{console.error('Start the runtime daemon first (npm run runtime:daemon)');process.exit(1);})\"",
     "docker:daemon": "node runtime-daemon/src/server.mjs",
     "docker:daemon:dev": "node --watch runtime-daemon/src/server.mjs",
     "preview": "pnpm run build && pnpm run start",

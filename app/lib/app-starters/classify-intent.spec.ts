@@ -30,6 +30,22 @@ describe('classifyAppIntentWithKeywords', () => {
     expect(result.category).toBe('unknown');
   });
 
+  it('does not treat a book reading tracker as a budget planner', () => {
+    const catalog: TemplateSummary[] = [
+      ...seedSummaries(),
+      {
+        category: 'monthly_budget_planner',
+        title: 'Monthly Budget Planner',
+        description: 'Track monthly expenses, income, and remaining budget',
+        keywords: ['budget', 'expense tracker', 'monthly budget', 'planner', 'app', 'tracker'],
+      },
+    ];
+
+    const result = classifyAppIntentWithKeywords('build a Book Reading Tracker application', catalog);
+
+    expect(result.category).toBe('unknown');
+  });
+
   it('matches a DB-grown category such as purchase orders', () => {
     const catalog: TemplateSummary[] = [
       ...seedSummaries(),

@@ -6,7 +6,7 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { getDockerRuntime } from '~/lib/runtime';
-import { chatId, description, markLiveChatStreaming, syncLiveChatUrl, useChatHistory, writeLiveChatSession } from '~/lib/persistence';
+import { chatId, description, markLiveChatStreaming, syncLiveChatUrl, useChatHistory, writeLiveChatSession, createChatId } from '~/lib/persistence';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { getEnvBlockedLlmProviders, getEnvDefaultLlmModel, getEnvDefaultLlmProvider, isBlockedLlmProvider } from '~/lib/modules/llm/defaults';
@@ -445,9 +445,7 @@ export const ChatImpl = memo(
         markLiveChatStreaming(true);
       }
 
-      // Only boot preview after the real /api/chat stream ends — not when
-      // fakeLoading drops during starter-template setup.
-      if (wasStreamingRef.current && !isLoading && !fakeLoading) {
+      if (wasStreamingRef.current && !streaming) {
         markLiveChatStreaming(false);
 
         const id = chatId.get();
@@ -461,7 +459,7 @@ export const ChatImpl = memo(
         }, 300);
       }
 
-      wasStreamingRef.current = isLoading;
+      wasStreamingRef.current = streaming;
     }, [isLoading, fakeLoading]);
 
     useSaveAppTemplateOnPreview({ isLoading, fakeLoading });
@@ -725,6 +723,12 @@ export const ChatImpl = memo(
       getDockerRuntime().setStreamLocked(true);
       markLiveChatStreaming(true);
 
+      if (!chatId.get()) {
+        chatId.set(createChatId());
+      }
+
+      await getDockerRuntime().ensureSession(chatId.get());
+
       let finalMessageContent = messageContent;
 
       if (selectedElement) {
@@ -785,44 +789,35 @@ export const ChatImpl = memo(
                 annotations: ['hidden'],
               },
             ]);
-
-            const reloadOptions =
-              uploadedFiles.length > 0
-                ? { experimental_attachments: await filesToAttachments(uploadedFiles) }
-                : undefined;
-
-            reload(reloadOptions);
-            finishFirstPromptUi();
-
-            return;
+          } else {
+            setMessages([
+              {
+                id: `1-${now}`,
+                role: 'user',
+                content: userMessageText,
+                parts: createMessageParts(userMessageText, imageDataList),
+              },
+              {
+                id: `2-${now}`,
+                role: 'assistant',
+                content: reused.assistantMessage,
+              },
+              {
+                id: `3-${now}`,
+                role: 'user',
+                content: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\nKeep the current UI. Do not rebuild from scratch.`,
+                annotations: ['hidden'],
+              },
+            ]);
           }
 
-          setMessages([
-            {
-              id: `1-${now}`,
-              role: 'user',
-              content: userMessageText,
-              parts: createMessageParts(userMessageText, imageDataList),
-            },
-            {
-              id: `2-${now}`,
-              role: 'assistant',
-              content: reused.assistantMessage,
-            },
-          ]);
+          const reloadOptions =
+            uploadedFiles.length > 0
+              ? { experimental_attachments: await filesToAttachments(uploadedFiles) }
+              : undefined;
 
+          reload(reloadOptions);
           finishFirstPromptUi();
-          markLiveChatStreaming(false);
-
-          const id = chatId.get();
-
-          if (id) {
-            syncLiveChatUrl(id);
-          }
-
-          window.setTimeout(() => {
-            workbenchStore.schedulePreviewFlush();
-          }, 300);
 
           return;
         }

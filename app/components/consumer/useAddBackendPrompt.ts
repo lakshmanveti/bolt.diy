@@ -110,6 +110,7 @@ export function useAddBackendPrompt(isStreaming: boolean) {
   return {
     visible,
     connected,
+    backendEnabled: alreadyWired || status === 'completed',
     dismiss,
     complete,
     followup: ADD_BACKEND_FOLLOWUP,

@@ -37,6 +37,7 @@ import { AppPreview } from './AppPreview';
 import { HeadlessBoltTerminal } from './HeadlessBoltTerminal.client';
 import { AddBackendCard } from './AddBackendCard';
 import { useAddBackendPrompt } from './useAddBackendPrompt';
+import { formatPreviewErrorFollowup } from '~/lib/stores/preview-runtime-error';
 
 const TEXTAREA_MIN_HEIGHT = 76;
 const TEXTAREA_MAX_HEIGHT = 160;
@@ -181,6 +182,13 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
       sendMessage?.({} as any, addBackend.followup);
       addBackend.complete();
     }, [addBackend, followupRequested, sendMessage]);
+
+    const handleFixPreviewError = useCallback(
+      (error: { message: string; filename?: string; lineno?: number }) => {
+        sendMessage?.({} as any, formatPreviewErrorFollowup(error));
+      },
+      [sendMessage],
+    );
 
     const scrollChatToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
       const el = chatScrollRef.current;
@@ -435,7 +443,7 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
 
     const composer = (
       <div className="flex flex-col gap-2 w-full">
-        {(supabaseAlert || deployAlert || llmErrorAlert) && (
+        {((supabaseAlert && addBackend.backendEnabled) || deployAlert || llmErrorAlert) && (
           <div className="flex flex-col gap-2">
             {deployAlert && (
               <DeployChatAlert
@@ -447,7 +455,7 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
                 }}
               />
             )}
-            {supabaseAlert && (
+            {supabaseAlert && addBackend.backendEnabled && (
               <SupabaseChatAlert
                 alert={supabaseAlert}
                 clearAlert={() => clearSupabaseAlert?.()}
@@ -558,6 +566,7 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
                     isStreaming={isStreaming}
                     setSelectedElement={setSelectedElement}
                     promptSummary={latestUserPrompt}
+                    onFixPreviewError={handleFixPreviewError}
                   />
                 )}
               </ClientOnly>

@@ -18,7 +18,7 @@ export const dockerPreviewBusy = atom(false);
 export const dockerStartStatus = atom<DockerStartStatus>(IDLE_START_STATUS);
 
 const RELOAD_QUERY = '_bl';
-const SKIP_RELOAD_FILES = /(?:^|\/)(?:\.buildlive-|buildlive-inspector\.js$|vite\.config\.)/;
+const SKIP_RELOAD_FILES = /(?:^|\/)(?:\.buildlive-|buildlive-inspector\.js$|vite\.config\.|\.bltmp$)/;
 
 function canonicalPreviewUrl(url: string): string {
   try {
@@ -37,6 +37,12 @@ type PreviewListener = (preview: PreviewInfoEvent) => void;
 const FAILURES_BEFORE_OFFLINE = 3;
 const HEALTH_TIMEOUT_MS = 5000;
 const PREVIEW_VERIFY_TIMEOUT_MS = 5000;
+/** How often to read start-status while waiting for Vite. Do not poll /preview this often. */
+const PREVIEW_WATCH_MS = 2000;
+const PREVIEW_HEALTH_MS = 15_000;
+const PREVIEW_GIVE_UP_MS = 240_000;
+const PREVIEW_INSTALL_GIVE_UP_MS = 10 * 60_000;
+const FALLBACK_START_COMMAND = 'npm install && npm run dev -- --host 0.0.0.0 --port 5173';
 
 /** Probe a mapped preview URL — 2xx/3xx counts as reachable (404 = broken preview). */
 export async function verifyPreviewReachable(baseUrl: string, timeoutMs = PREVIEW_VERIFY_TIMEOUT_MS): Promise<boolean> {
@@ -108,7 +114,12 @@ export class DockerRuntime implements AppRuntime {
   /** When reopening a chat, skip rewriting files/exec/start that are already on disk. */
   #hydrateSkipWrites = false;
   #sessionCreate: Promise<void> | undefined;
-  #statusPoll: ReturnType<typeof setInterval> | undefined;
+  /** True after spawn until GET /preview reports HTTP-ready — keep overlay + polling. */
+  #waitingForPreview = false;
+  #previewWatchId = 0;
+  #previewWatchRunning = false;
+  /** After install, call POST /resume once — same attach path as a chat page reload. */
+  #triedResumeAttach = false;
 
   constructor(daemonUrl: string = DEFAULT_RUNTIME_DAEMON_URL) {
     this.#daemonUrl = daemonUrl.replace(/\/$/, '');
@@ -123,7 +134,9 @@ export class DockerRuntime implements AppRuntime {
       );
     }
 
-    await this.ensureSession(this.#sessionKey);
+    if (this.#sessionKey) {
+      await this.ensureSession(this.#sessionKey);
+    }
   }
 
   /**
@@ -141,43 +154,37 @@ export class DockerRuntime implements AppRuntime {
       clearTimeout(this.#reloadTimer);
       this.#reloadTimer = undefined;
       dockerPreviewBusy.set(false);
-      this.#stopStartStatusPolling();
+    }
+
+    if (!locked) {
+      void this.flushPreview({ fromStreamEnd: true });
     }
   }
 
   #setPreviewBusy(busy: boolean) {
     dockerPreviewBusy.set(busy);
 
-    if (busy) {
-      this.#beginStartStatusPolling();
-    } else {
-      void this.#pullStartStatus().finally(() => {
-        this.#stopStartStatusPolling();
-
-        if (dockerStartStatus.get().stage === 'ready') {
-          dockerStartStatus.set(IDLE_START_STATUS);
-        }
-      });
+    if (!busy && !this.#waitingForPreview) {
+      if (dockerStartStatus.get().stage === 'ready') {
+        dockerStartStatus.set(IDLE_START_STATUS);
+      }
     }
   }
 
-  #beginStartStatusPolling() {
-    if (!dockerStartStatus.get().startedAt) {
-      dockerStartStatus.set(formatStartStatus({ stage: 'container', startedAt: Date.now() }));
-    }
-
-    this.#stopStartStatusPolling();
-    this.#statusPoll = setInterval(() => {
-      void this.#pullStartStatus();
-    }, 700);
-    void this.#pullStartStatus();
+  #markPreviewPending() {
+    this.#waitingForPreview = true;
+    this.#setPreviewBusy(true);
+    this.#beginPreviewWatch();
   }
 
-  #stopStartStatusPolling() {
-    if (this.#statusPoll) {
-      clearInterval(this.#statusPoll);
-      this.#statusPoll = undefined;
-    }
+  #markPreviewLive(preview: PreviewInfoEvent) {
+    this.#stopPreviewWatch();
+    this.#waitingForPreview = false;
+    this.#lastPreviewUrl = undefined;
+    this.#emitPreview(preview);
+    this.#bumpReloadToken();
+    this.#setPreviewBusy(false);
+    this.#startPreviewPolling();
   }
 
   async #pullStartStatus() {
@@ -290,9 +297,22 @@ export class DockerRuntime implements AppRuntime {
       this.#sessionCreate = undefined;
       this.#lastPreviewUrl = undefined;
       this.#lastPreviewPort = undefined;
+      this.#pendingStartCommand = undefined;
+      this.#waitingForPreview = false;
+      this.#triedResumeAttach = false;
+      this.#stopPreviewWatch();
       this.#stopPreviewPolling();
+      void import('~/lib/stores/workbench')
+        .then(({ workbenchStore }) => {
+          workbenchStore.clearPreviews();
+        })
+        .catch(() => undefined);
     } else if (sessionKey) {
       this.#sessionKey = sessionKey;
+    }
+
+    if (!this.#sessionKey) {
+      return;
     }
 
     if (this.#sessionId) {
@@ -311,8 +331,55 @@ export class DockerRuntime implements AppRuntime {
     }
   }
 
+  /**
+   * Stop the container and delete the on-disk session for this chat.
+   * No-ops if the daemon is down or the session is already gone.
+   */
+  async destroySessionForChat(chatId: string): Promise<void> {
+    const key = chatId.trim();
+
+    if (!key) {
+      return;
+    }
+
+    if (this.#sessionKey === key || this.#sessionId === key) {
+      this.#unbindLocalSession();
+    }
+
+    try {
+      const res = await fetch(`${this.#daemonUrl}/sessions/by-chat/${encodeURIComponent(key)}`, {
+        method: 'DELETE',
+      });
+
+      if (!res.ok && res.status !== 404) {
+        console.warn(`[docker-runtime] failed to destroy session for chat ${key}: ${res.status}`);
+      }
+    } catch {
+      // Daemon not running — chat delete should still succeed
+    }
+  }
+
+  #unbindLocalSession() {
+    this.#stopPreviewPolling();
+    this.#sessionId = undefined;
+    this.#sessionKey = undefined;
+    this.#sessionCreate = undefined;
+    this.#lastPreviewUrl = undefined;
+    this.#lastPreviewPort = undefined;
+    this.#waitingForPreview = false;
+    this.#triedResumeAttach = false;
+    this.#hydrateSkipWrites = false;
+    this.#stopPreviewWatch();
+    dockerPreviewBusy.set(false);
+    dockerStartStatus.set(IDLE_START_STATUS);
+  }
+
   async #createDaemonSession(): Promise<void> {
-    const chatId = this.#sessionKey || `session-${Date.now()}`;
+    const chatId = this.#sessionKey;
+
+    if (!chatId) {
+      throw new Error('Docker session requires a chat id');
+    }
     const res = await fetch(`${this.#daemonUrl}/sessions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -329,19 +396,23 @@ export class DockerRuntime implements AppRuntime {
       preview?: { port: number; hostPort: number; url: string; ready: boolean } | null;
     };
     this.#sessionId = data.id;
-    this.#startPreviewPolling();
 
     if (data.preview?.ready && data.preview.url) {
       this.#emitPreview(toPreviewEvent(data.preview));
+      this.#startPreviewPolling();
     }
   }
 
   /**
-   * Reopen an existing chat: attach warm preview or soft-start without a full cold install.
+   * Attach like a chat page reload: probe the running server, or soft-start Vite
+   * now that node_modules exists. `quiet` skips resetting the overlay (used from
+   * the first-generate wait loop).
    */
-  async resume(chatId: string): Promise<ResumeResult> {
-    dockerStartStatus.set(formatStartStatus({ stage: 'container', startedAt: Date.now() }));
-    this.#setPreviewBusy(true);
+  async resume(chatId: string, options?: { quiet?: boolean }): Promise<ResumeResult> {
+    if (!options?.quiet) {
+      dockerStartStatus.set(formatStartStatus({ stage: 'container', startedAt: Date.now() }));
+      this.#setPreviewBusy(true);
+    }
 
     try {
       await this.ensureSession(chatId);
@@ -369,7 +440,9 @@ export class DockerRuntime implements AppRuntime {
       const preview = data.preview?.ready && data.preview.url ? toPreviewEvent(data.preview) : undefined;
 
       if (preview) {
-        this.#emitPreview(preview);
+        this.#markPreviewLive(preview);
+      } else if (data.softStarted || data.preview) {
+        this.#markPreviewPending();
       }
 
       return {
@@ -380,7 +453,9 @@ export class DockerRuntime implements AppRuntime {
         preview,
       };
     } finally {
-      this.#setPreviewBusy(false);
+      if (!this.#waitingForPreview) {
+        this.#setPreviewBusy(false);
+      }
     }
   }
 
@@ -436,6 +511,15 @@ export class DockerRuntime implements AppRuntime {
 
     await this.ensureSession();
 
+    if (!this.#sessionId) {
+      return;
+    }
+
+    if (this.#waitingForPreview || this.#previewWatchRunning) {
+      this.#beginPreviewWatch();
+      return;
+    }
+
     if (this.#reloadTimer) {
       clearTimeout(this.#reloadTimer);
       this.#reloadTimer = undefined;
@@ -443,7 +527,12 @@ export class DockerRuntime implements AppRuntime {
 
     await this.#withPreviewLock(async () => undefined);
 
-    if (this.#pendingStartCommand && !this.#lastPreviewUrl) {
+    if (this.#lastPreviewUrl && (await verifyPreviewReachable(this.#lastPreviewUrl))) {
+      this.#bumpReloadToken();
+      return;
+    }
+
+    if (this.#pendingStartCommand) {
       const command = this.#pendingStartCommand;
       this.#pendingStartCommand = undefined;
       await this.#startProcess(command);
@@ -451,30 +540,18 @@ export class DockerRuntime implements AppRuntime {
     }
 
     if (this.#filesWrittenSinceRedeploy || !this.#lastPreviewUrl) {
-      const preview = await this.#redeployPreview();
+      const preview = await this.#restartPreviewProcess();
 
       if (preview) {
-        this.#pendingStartCommand = undefined;
         return;
       }
 
-      if (this.#pendingStartCommand) {
-        const command = this.#pendingStartCommand;
-        this.#pendingStartCommand = undefined;
-        await this.#startProcess(command);
-        return;
+      try {
+        await this.#startProcess(FALLBACK_START_COMMAND);
+      } catch (error) {
+        console.warn('[DockerRuntime] fallback start failed', error);
+        this.#beginPreviewWatch();
       }
-    }
-
-    if (this.#lastPreviewUrl) {
-      const reachable = await verifyPreviewReachable(this.#lastPreviewUrl);
-
-      if (!reachable) {
-        await this.#redeployPreview();
-        return;
-      }
-
-      this.#bumpReloadToken();
     }
   }
 
@@ -483,40 +560,42 @@ export class DockerRuntime implements AppRuntime {
    * Emits a new preview event when the daemon reports ready.
    */
   async recoverPreview(): Promise<PreviewInfoEvent | null> {
-    if (this.#streamLocked) {
-      if (this.#lastPreviewUrl) {
-        return {
-          port: this.#lastPreviewPort || 5173,
-          ready: true,
-          baseUrl: this.#lastPreviewUrl,
-        };
-      }
-
-      return null;
-    }
     await this.ensureSession();
 
     if (!this.#sessionId) {
       return null;
     }
 
-    return this.#withPreviewLock(async () => {
-      if (this.#lastPreviewUrl && (await verifyPreviewReachable(this.#lastPreviewUrl))) {
-        return {
-          port: this.#lastPreviewPort || 5173,
-          ready: true,
-          baseUrl: this.#lastPreviewUrl,
-        };
+    if (this.#waitingForPreview || this.#previewWatchRunning) {
+      return null;
+    }
+
+    if (this.#lastPreviewUrl && (await verifyPreviewReachable(this.#lastPreviewUrl))) {
+      this.#bumpReloadToken();
+      return {
+        port: this.#lastPreviewPort || 5173,
+        ready: true,
+        baseUrl: this.#lastPreviewUrl,
+      };
+    }
+
+    this.#setPreviewBusy(true);
+
+    try {
+      const restarted = await this.#restartPreviewProcess();
+
+      if (restarted) {
+        return restarted;
       }
 
-      this.#setPreviewBusy(true);
-
-      try {
-        return await this.#restartPreviewProcess();
-      } finally {
+      await this.#startProcess(this.#pendingStartCommand || FALLBACK_START_COMMAND);
+      this.#beginPreviewWatch();
+      return null;
+    } finally {
+      if (!this.#waitingForPreview) {
         this.#setPreviewBusy(false);
       }
-    });
+    }
   }
 
   #schedulePreviewRedeploy(delayMs = 1500) {
@@ -565,19 +644,21 @@ export class DockerRuntime implements AppRuntime {
         preview?: { port: number; hostPort: number; url: string; ready: boolean } | null;
       };
 
-      if (!res.ok || !data.preview?.ready || !data.preview.url) {
+      if (!res.ok) {
+        this.#waitingForPreview = false;
         console.warn('[DockerRuntime] preview restart failed:', data.error);
         return null;
       }
 
-      // Allow re-emit even if host port/URL are unchanged
-      this.#lastPreviewUrl = undefined;
-      const event = toPreviewEvent(data.preview);
-      this.#emitPreview(event);
-      this.#bumpReloadToken();
       this.#filesWrittenSinceRedeploy = false;
 
-      return event;
+      if (data.preview?.ready && data.preview.url) {
+        this.#markPreviewLive(toPreviewEvent(data.preview));
+        return toPreviewEvent(data.preview);
+      }
+
+      this.#markPreviewPending();
+      return null;
     } catch (error) {
       console.warn('[DockerRuntime] preview restart failed:', error);
       return null;
@@ -601,7 +682,9 @@ export class DockerRuntime implements AppRuntime {
 
         return lastResult;
       } finally {
-        this.#setPreviewBusy(false);
+        if (!this.#waitingForPreview) {
+          this.#setPreviewBusy(false);
+        }
       }
     });
   }
@@ -708,6 +791,7 @@ export class DockerRuntime implements AppRuntime {
       }
 
       this.#setPreviewBusy(true);
+      this.#triedResumeAttach = false;
       dockerStartStatus.set(formatStartStatus({ stage: 'install', startedAt: Date.now() }));
 
       try {
@@ -721,27 +805,29 @@ export class DockerRuntime implements AppRuntime {
           error?: string;
           output?: string;
           resumed?: boolean;
+          pending?: boolean;
           preview?: { port: number; hostPort: number; url: string; ready: boolean } | null;
         };
 
         if (!res.ok) {
+          this.#waitingForPreview = false;
           throw new Error(data.error || data.output || 'Docker start failed');
         }
 
-        if (data.preview?.url && data.preview.ready) {
-          this.#lastPreviewUrl = undefined;
-          const event = toPreviewEvent(data.preview);
-          this.#emitPreview(event);
-          this.#bumpReloadToken();
-          this.#filesWrittenSinceRedeploy = false;
-          this.#pendingStartCommand = undefined;
+        this.#filesWrittenSinceRedeploy = false;
+        this.#pendingStartCommand = undefined;
 
-          return event;
+        if (data.preview?.url && data.preview.ready) {
+          this.#markPreviewLive(toPreviewEvent(data.preview));
+          return toPreviewEvent(data.preview);
         }
 
-        throw new Error(data.output || 'Preview server did not become ready');
+        this.#markPreviewPending();
+        return undefined;
       } finally {
-        this.#setPreviewBusy(false);
+        if (!this.#waitingForPreview) {
+          this.#setPreviewBusy(false);
+        }
       }
     });
   }
@@ -764,19 +850,9 @@ export class DockerRuntime implements AppRuntime {
       ? { ...preview, baseUrl: canonicalPreviewUrl(preview.baseUrl) }
       : preview;
 
-    if (next.ready && next.baseUrl === this.#lastPreviewUrl && next.port === this.#lastPreviewPort) {
-      return;
-    }
-
     if (next.ready) {
-      const becameReady = !this.#lastPreviewUrl;
       this.#lastPreviewUrl = next.baseUrl;
       this.#lastPreviewPort = next.port;
-
-      if (becameReady && this.#previewPoll) {
-        this.#stopPreviewPolling();
-        this.#startPreviewPolling();
-      }
     }
 
     for (const listener of this.#previewListeners) {
@@ -784,17 +860,129 @@ export class DockerRuntime implements AppRuntime {
     }
   }
 
-  #startPreviewPolling() {
-    if (this.#previewPoll || !this.#sessionId) {
+  #stopPreviewWatch() {
+    this.#previewWatchId += 1;
+    this.#previewWatchRunning = false;
+  }
+
+  #beginPreviewWatch() {
+    this.#waitingForPreview = true;
+    this.#setPreviewBusy(true);
+    this.#stopPreviewPolling();
+
+    if (this.#previewWatchRunning) {
       return;
     }
 
-    this.#previewPoll = setInterval(
-      () => {
-        void this.#pollPreview();
-      },
-      this.#lastPreviewUrl ? 10000 : 2000,
-    );
+    const watchId = ++this.#previewWatchId;
+    this.#previewWatchRunning = true;
+    void this.#runPreviewWatch(watchId).finally(() => {
+      if (watchId === this.#previewWatchId) {
+        this.#previewWatchRunning = false;
+      }
+    });
+  }
+
+  async #runPreviewWatch(watchId: number) {
+    const startedAt = Date.now();
+
+    while (watchId === this.#previewWatchId) {
+      if (!this.#sessionId) {
+        return;
+      }
+
+      await this.#pullStartStatus();
+
+      const stage = dockerStartStatus.get().stage;
+      const installing = stage === 'install' || stage === 'container';
+      const waited = Date.now() - startedAt;
+
+      // Same path as a chat page reload: once packages are in, POST /resume
+      // force-probes Vite or soft-starts it. GET /preview alone never did this.
+      if ((stage === 'server' || stage === 'ready') && !this.#triedResumeAttach && this.#sessionKey) {
+        this.#triedResumeAttach = true;
+        const result = await this.resume(this.#sessionKey, { quiet: true });
+
+        if (result.preview?.ready) {
+          return;
+        }
+      }
+
+      if (!installing || waited >= 20_000) {
+        const live = await this.#attachIfPreviewReady();
+
+        if (live) {
+          return;
+        }
+      }
+
+      const elapsed = Date.now() - startedAt;
+      const giveUpMs = installing ? PREVIEW_INSTALL_GIVE_UP_MS : PREVIEW_GIVE_UP_MS;
+
+      if (elapsed >= giveUpMs) {
+        if (watchId === this.#previewWatchId) {
+          this.#waitingForPreview = false;
+          this.#setPreviewBusy(false);
+          dockerStartStatus.set(
+            formatStartStatus({
+              stage: 'error',
+              error: 'Preview did not become ready. Click Retry.',
+              startedAt,
+            }),
+          );
+        }
+
+        return;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, PREVIEW_WATCH_MS));
+    }
+  }
+
+  async #attachIfPreviewReady(): Promise<boolean> {
+    if (!this.#sessionId) {
+      return false;
+    }
+
+    try {
+      const res = await fetch(`${this.#daemonUrl}/sessions/${this.#sessionId}/preview`, {
+        cache: 'no-store',
+      });
+
+      if (!res.ok) {
+        return false;
+      }
+
+      const data = (await res.json()) as {
+        preview?: { port: number; hostPort?: number; url: string; ready: boolean } | null;
+      };
+
+      if (data.preview?.ready && data.preview.url) {
+        const event = toPreviewEvent(data.preview);
+
+        if (this.#waitingForPreview) {
+          this.#markPreviewLive(event);
+        } else {
+          this.#emitPreview(event);
+        }
+
+        return true;
+      }
+    } catch {
+      // keep waiting through transient daemon/Docker blips
+    }
+
+    return false;
+  }
+
+  #startPreviewPolling() {
+    if (this.#previewPoll || !this.#sessionId || this.#waitingForPreview || !this.#lastPreviewUrl) {
+      return;
+    }
+
+    this.#previewPoll = setInterval(() => {
+      void this.#pollPreview();
+    }, PREVIEW_HEALTH_MS);
   }
 
   #stopPreviewPolling() {
@@ -805,30 +993,15 @@ export class DockerRuntime implements AppRuntime {
   }
 
   async #pollPreview() {
-    if (!this.#sessionId || this.#previewListeners.size === 0 || this.#streamLocked) {
+    if (!this.#sessionId || this.#previewListeners.size === 0) {
       return;
     }
 
-    try {
-      const res = await fetch(`${this.#daemonUrl}/sessions/${this.#sessionId}/preview`);
-      if (!res.ok) {
-        return;
-      }
-
-      const data = (await res.json()) as {
-        preview?: { port: number; hostPort: number; url: string; ready: boolean } | null;
-      };
-
-      if (data.preview?.ready && data.preview.url) {
-        const nextUrl = canonicalPreviewUrl(data.preview.url);
-
-        if (nextUrl !== this.#lastPreviewUrl) {
-          this.#emitPreview(toPreviewEvent(data.preview));
-        }
-      }
-    } catch {
-      // ignore transient poll errors
+    if (this.#streamLocked || this.#waitingForPreview) {
+      return;
     }
+
+    await this.#attachIfPreviewReady();
   }
 }
 

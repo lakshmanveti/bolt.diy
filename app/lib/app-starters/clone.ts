@@ -1,12 +1,12 @@
 import type { ProviderInfo } from '~/types/model';
 import { getDockerRuntime } from '~/lib/runtime';
-import { chatId, db } from '~/lib/persistence';
-import { getNextId } from '~/lib/persistence/db';
+import { chatId } from '~/lib/persistence';
+import { createChatId } from '~/lib/persistence/chat-id';
 import { APP_NAME } from '~/utils/brand';
 import { createScopedLogger } from '~/utils/logger';
 import { fetchCatalogSummaries, fetchTemplateByCategory } from './catalog';
 import { classifyAppIntent } from './classify-intent';
-import { matchCatalog, meaningfulExtras, snapCategoryToCatalog } from './match-catalog';
+import { CATALOG_MATCH_THRESHOLD, matchCatalog, meaningfulExtras, scoreCatalogItem, snapCategoryToCatalog } from './match-catalog';
 import { MIN_STARTER_CONFIDENCE, type AppIntentClassification, type AppStarter } from './types';
 
 const logger = createScopedLogger('app-starters.clone');
@@ -30,17 +30,10 @@ async function ensureChatIdForClone(): Promise<string> {
     return existing;
   }
 
-  if (db) {
-    const nextId = await getNextId(db);
-    chatId.set(nextId);
+  const nextId = createChatId();
+  chatId.set(nextId);
 
-    return nextId;
-  }
-
-  const fallback = `session-${Date.now()}`;
-  chatId.set(fallback);
-
-  return fallback;
+  return nextId;
 }
 
 export function buildStarterArtifactMessage(starter: AppStarter): string {
@@ -136,6 +129,16 @@ export async function tryApplyCuratedStarter(options: {
   if (classification.category === 'unknown' || classification.confidence < MIN_STARTER_CONFIDENCE) {
     logger.info('No reusable template', classification);
     return { classification, applied: null };
+  }
+
+  const catalogItem = catalog.find((item) => item.category === classification.category);
+
+  if (catalogItem && scoreCatalogItem(options.message, catalogItem) < CATALOG_MATCH_THRESHOLD) {
+    logger.info(
+      `Refusing template "${classification.category}" — prompt topics do not overlap the snapshot`,
+      classification,
+    );
+    return { classification: { ...classification, category: 'unknown', confidence: 0 }, applied: null };
   }
 
   const starter = await fetchTemplateByCategory(classification.category);

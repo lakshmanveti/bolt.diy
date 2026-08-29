@@ -3,12 +3,13 @@ import { createScopedLogger } from '~/utils/logger';
 import type { ChatHistoryItem } from './useChatHistory';
 import type { Snapshot } from './types';
 import { isSupabaseConfigured } from '~/lib/supabase/client';
+import { destroyDaemonSessionForChat } from '~/lib/runtime';
+import { createChatId } from './chat-id';
 import {
   supabaseDeleteChat,
   supabaseDeleteSnapshot,
   supabaseGetAllChats,
   supabaseGetChat,
-  supabaseGetNextId,
   supabaseGetSnapshot,
   supabaseSetSnapshot,
   supabaseUpsertChat,
@@ -293,37 +294,13 @@ export async function deleteById(db: IDBDatabase, id: string): Promise<void> {
       syncWarn('deleteById', error);
     }
   }
+
+  await destroyDaemonSessionForChat(id);
 }
 
-export async function getNextId(db: IDBDatabase): Promise<string> {
-  if (isSupabaseConfigured()) {
-    try {
-      const remoteNext = await supabaseGetNextId();
-      const localNext = await idbGetNextId(db);
-      const next = String(Math.max(Number(remoteNext || 0), Number(localNext || 0)));
-
-      return next === '0' ? '1' : next;
-    } catch (error) {
-      syncWarn('getNextId', error);
-    }
-  }
-
-  return idbGetNextId(db);
-}
-
-async function idbGetNextId(db: IDBDatabase): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('chats', 'readonly');
-    const store = transaction.objectStore('chats');
-    const request = store.getAllKeys();
-
-    request.onsuccess = () => {
-      const highestId = request.result.reduce((cur, acc) => Math.max(+cur, +acc), 0);
-      resolve(String(+highestId + 1));
-    };
-
-    request.onerror = () => reject(request.error);
-  });
+/** @deprecated Use createChatId(). Kept so older callers still compile. */
+export async function getNextId(_db?: IDBDatabase): Promise<string> {
+  return createChatId();
 }
 
 export async function getUrlId(db: IDBDatabase, id: string): Promise<string> {
@@ -413,7 +390,7 @@ export async function createChatFromMessages(
   messages: Message[],
   metadata?: IChatMetadata,
 ): Promise<string> {
-  const newId = await getNextId(db);
+  const newId = createChatId();
   const newUrlId = await getUrlId(db, newId);
 
   await setMessages(db, newId, messages, newUrlId, description, undefined, metadata);

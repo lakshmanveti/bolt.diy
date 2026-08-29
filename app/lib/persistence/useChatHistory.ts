@@ -8,7 +8,6 @@ import { workbenchStore } from '~/lib/stores/workbench';
 import { logStore } from '~/lib/stores/logs'; // Import logStore
 import {
   getMessages,
-  getNextId,
   getUrlId,
   openDatabase,
   setMessages,
@@ -22,6 +21,7 @@ import {
 import { authReadyStore, authUserStore, isSupabaseConfigured } from '~/lib/supabase/client';
 import type { FileMap } from '~/lib/stores/files';
 import type { Snapshot } from './types';
+import { createChatId } from './chat-id';
 import { getEffectiveExecutionTarget, getDockerRuntime, isDockerRuntimeAvailable } from '~/lib/runtime';
 import { recoverLiveChatSession, writeLiveChatSession } from './live-chat-session';
 
@@ -348,7 +348,7 @@ export function useChatHistory() {
       }
 
       if (initialMessages.length === 0 && !chatId.get()) {
-        chatId.set(await getNextId(db));
+        chatId.set(createChatId());
       }
 
       const finalChatId = chatId.get();

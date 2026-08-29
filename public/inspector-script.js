@@ -2,6 +2,65 @@
   let isInspectorActive = false;
   let inspectorStyle = null;
   let currentHighlight = null;
+  let lastReportedError = '';
+
+  function shouldIgnoreError(message) {
+    const text = String(message || '');
+    return (
+      !text.trim() ||
+      /^Script error\.?$/i.test(text) ||
+      /ResizeObserver loop/i.test(text) ||
+      /chrome-extension:|moz-extension:/i.test(text)
+    );
+  }
+
+  function reportPreviewError(payload) {
+    const message = String(payload && payload.message ? payload.message : '').trim();
+
+    if (shouldIgnoreError(message) || message === lastReportedError) {
+      return;
+    }
+
+    lastReportedError = message;
+    window.parent.postMessage({
+      type: 'BUILDLIVE_PREVIEW_ERROR',
+      message: message.slice(0, 1500),
+      filename: payload && payload.filename ? String(payload.filename) : '',
+      lineno: payload && payload.lineno ? Number(payload.lineno) : 0,
+    }, '*');
+  }
+
+  window.addEventListener('error', function(event) {
+    reportPreviewError({
+      message: (event && event.message) || (event && event.error && event.error.message) || 'The preview hit an error.',
+      filename: event && event.filename,
+      lineno: event && event.lineno,
+    });
+  }, true);
+
+  window.addEventListener('unhandledrejection', function(event) {
+    const reason = event && event.reason;
+    reportPreviewError({
+      message: (reason && reason.message) || String(reason || 'Unhandled promise error'),
+      filename: reason && reason.fileName,
+      lineno: reason && reason.lineNumber,
+    });
+  });
+
+  function readViteOverlay() {
+    const overlay = document.querySelector('vite-error-overlay');
+    if (!overlay) {
+      return;
+    }
+    const text = ((overlay.shadowRoot && overlay.shadowRoot.textContent) || overlay.textContent || '').trim();
+    if (text) {
+      reportPreviewError({ message: text });
+    }
+  }
+
+  const overlayObserver = new MutationObserver(readViteOverlay);
+  overlayObserver.observe(document.documentElement, { childList: true, subtree: true });
+  setInterval(readViteOverlay, 1500);
 
   // Function to get relevant styles
   function getRelevantStyles(element) {

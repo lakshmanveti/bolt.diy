@@ -1,6 +1,7 @@
 import type { ProviderInfo } from '~/types/model';
 import { createScopedLogger } from '~/utils/logger';
 import { seedSummaries } from './manifest';
+import { matchCatalog } from './match-catalog';
 import { UNKNOWN_INTENT, isValidCategorySlug, slugifyCategory, type AppIntentClassification, type TemplateSummary } from './types';
 
 const logger = createScopedLogger('app-starters.classify');
@@ -104,9 +105,11 @@ Existing template categories:
 ${catalogBlock}
 
 Rules:
-- Match INTENT, not exact wording. "Todo app for my team" and "task manager application" are the same category.
-- If the request is the same kind of product as an existing category, use that category slug even if extras differ (theme, industry, extra fields).
-- If it is a different kind of product (e.g. procurement vs todo vs CRM), use a NEW snake_case slug (purchase_order, crm, inventory, ...).
+- Match the PRODUCT, not the shape. "Todo app for my team" and "task manager application" are the same category because both are about tasks/todos.
+- "X tracker" is NOT the same as "Y tracker". The noun matters: a book reading tracker is not a budget tracker, habit tracker, or issue tracker.
+- Do not reuse a category just because both are an "app", "tracker", "planner", "manager", "dashboard", or "list".
+- Only use an existing category slug if the user's distinctive topic words (book, reading, budget, expense, ticket, …) appear in that template's title/description/keywords.
+- If it is a different kind of product, use a NEW snake_case slug (book_reading_tracker, purchase_order, crm, inventory, ...).
 - Use "unknown" only when you cannot tell what they want.
 - extras: requirements NOT in a generic app of that category. Empty array if the request is generic.
 - keywords: 3–8 short phrases people might type for this kind of app.
@@ -119,39 +122,18 @@ export function classifyAppIntentWithKeywords(
   message: string,
   catalog: TemplateSummary[] = seedSummaries(),
 ): AppIntentClassification {
-  const haystack = message.toLowerCase();
-  let best: { item: TemplateSummary; hits: number; longest: number } | undefined;
+  const match = matchCatalog(message, catalog);
 
-  for (const item of catalog) {
-    let hits = 0;
-    let longest = 0;
-
-    for (const keyword of item.keywords) {
-      if (keyword && haystack.includes(keyword.toLowerCase())) {
-        hits += 1;
-        longest = Math.max(longest, keyword.length);
-      }
-    }
-
-    if (hits === 0) {
-      continue;
-    }
-
-    if (!best || hits > best.hits || (hits === best.hits && longest > best.longest)) {
-      best = { item, hits, longest };
-    }
-  }
-
-  if (!best) {
+  if (!match) {
     return UNKNOWN_INTENT;
   }
 
   return {
-    category: best.item.category,
-    title: best.item.title,
-    confidence: best.longest >= 10 || best.hits >= 2 ? 0.78 : 0.68,
+    category: match.item.category,
+    title: match.item.title,
+    confidence: Math.min(0.95, 0.7 + match.score / 20),
     extras: [],
-    keywords: best.item.keywords,
+    keywords: match.item.keywords,
   };
 }
 

@@ -551,6 +551,15 @@ export class ActionRunner {
     const { operation, content, filePath } = action;
     logger.debug('[Supabase Action]:', { operation, filePath, content });
 
+    const { chatId } = await import('~/lib/persistence/useChatHistory');
+    const { workbenchStore } = await import('~/lib/stores/workbench');
+    const { supabaseActionsAllowed } = await import('~/lib/backend/needs-persistence');
+
+    if (!supabaseActionsAllowed(chatId.get(), workbenchStore.files.get())) {
+      logger.info('Skipping supabase action until Add Backend is requested');
+      return { success: true, skipped: true };
+    }
+
     switch (operation) {
       case 'migration':
         if (!filePath) {

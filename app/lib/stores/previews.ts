@@ -30,6 +30,12 @@ export class PreviewsStore {
 
   previews = atom<PreviewInfo[]>([]);
 
+  clear() {
+    this.#availablePreviews.clear();
+    this.#previewVerifyGeneration += 1;
+    this.previews.set([]);
+  }
+
   constructor(webcontainerPromise: Promise<WebContainer>) {
     this.#webcontainer = webcontainerPromise;
     this.#broadcastChannel = this.#maybeCreateChannel(PREVIEW_CHANNEL);
@@ -199,31 +205,38 @@ export class PreviewsStore {
 
     previewHealthStore.set({ status: 'checking', autoRetryCount: 0 });
 
+    const probeUntilReachable = async () => {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        if (generation !== this.#previewVerifyGeneration || streamingState.get() || dockerPreviewBusy.get()) {
+          return 'aborted' as const;
+        }
+
+        if (await verifyPreviewReachable(currentUrl)) {
+          return 'ok' as const;
+        }
+
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+
+      return 'down' as const;
+    };
+
     while (retries <= MAX_PREVIEW_AUTO_RETRIES) {
       if (generation !== this.#previewVerifyGeneration || streamingState.get()) {
         return;
       }
 
-      while (dockerPreviewBusy.get()) {
-        if (streamingState.get()) {
-          return;
-        }
-
-        previewHealthStore.set({
-          status: 'recovering',
-          autoRetryCount: retries,
-          message: 'Updating preview…',
-        });
-        await new Promise((r) => setTimeout(r, 300));
-
-        if (generation !== this.#previewVerifyGeneration || streamingState.get()) {
-          return;
-        }
+      if (dockerPreviewBusy.get()) {
+        return;
       }
 
-      const reachable = await verifyPreviewReachable(currentUrl);
+      const probe = await probeUntilReachable();
 
-      if (reachable) {
+      if (probe === 'aborted') {
+        return;
+      }
+
+      if (probe === 'ok') {
         previewHealthStore.set({ status: 'healthy', autoRetryCount: retries });
         return;
       }
@@ -241,7 +254,7 @@ export class PreviewsStore {
       previewHealthStore.set({
         status: 'recovering',
         autoRetryCount: retries,
-        message: 'Preview not responding — auto-retrying…',
+        message: 'Preview not responding — retrying…',
       });
 
       retries += 1;
@@ -252,7 +265,6 @@ export class PreviewsStore {
       }
 
       if (!recovered?.ready || !recovered.baseUrl) {
-        await new Promise((r) => setTimeout(r, 1500));
         continue;
       }
 

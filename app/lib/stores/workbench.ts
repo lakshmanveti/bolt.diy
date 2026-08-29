@@ -94,6 +94,10 @@ export class WorkbenchStore {
     return this.#previewsStore.previews;
   }
 
+  clearPreviews() {
+    this.#previewsStore.clear();
+  }
+
   get files() {
     return this.#filesStore.files;
   }

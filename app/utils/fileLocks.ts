@@ -15,7 +15,7 @@ const logger = createScopedLogger('FileLocks');
 export function getCurrentChatId(): string {
   try {
     if (typeof window !== 'undefined') {
-      // Extract chat ID from URL (format: /chat/123)
+      // Extract chat ID from URL (format: /chat/<id> — UUID for new chats)
       const match = window.location.pathname.match(/\/chat\/([^/]+)/);
 
       if (match && match[1]) {

@@ -3,8 +3,13 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ButtonHTM
 import { toast } from 'react-toastify';
 import type { ProgressAnnotation } from '~/types/context';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { dockerPreviewBusy, dockerPreviewReloadToken, dockerStartStatus } from '~/lib/runtime';
+import { dockerPreviewBusy, dockerPreviewReloadToken, dockerStartStatus, getDockerRuntime } from '~/lib/runtime';
 import { previewHealthStore } from '~/lib/stores/preview-health';
+import {
+  clearPreviewRuntimeError,
+  previewRuntimeErrorStore,
+  setPreviewRuntimeError,
+} from '~/lib/stores/preview-runtime-error';
 import { retryPreviewRecovery } from '~/lib/stores/previews';
 import { classNames } from '~/utils/classNames';
 import { Inspector, type ElementInfo } from '~/components/workbench/Inspector';
@@ -57,6 +62,7 @@ interface AppPreviewProps {
   setSelectedElement?: (element: ElementInfo | null) => void;
   /** Latest user prompt for wait-state summary on the build panel. */
   promptSummary?: string;
+  onFixPreviewError?: (error: { message: string; filename?: string; lineno?: number }) => void;
 }
 
 /** iPhone 12/13 logical size — simple consumer mobile frame */
@@ -124,7 +130,15 @@ function PreviewToolbar({
   return (
     <div className="flex items-center gap-2 px-3 py-2 border-b border-bolt-elements-borderColor shrink-0">
       <div className="flex min-w-0 flex-1 items-center">
-        <BuildLiveLogo size="sm" />
+        <a
+          href="/"
+          className="flex min-w-0 items-center"
+          title="Home"
+          aria-label="Go to homepage"
+          onClick={onNewAppClick}
+        >
+          <BuildLiveLogo size="sm" />
+        </a>
       </div>
 
       <div className="flex items-center gap-1.5 shrink-0">
@@ -286,12 +300,13 @@ function MobileFrame({
  * While building, shows a single bold status panel (no duplicate progress in chat).
  */
 export const AppPreview = memo(
-  ({ annotations = [], isStreaming = false, setSelectedElement, promptSummary }: AppPreviewProps) => {
+  ({ annotations = [], isStreaming = false, setSelectedElement, promptSummary, onFixPreviewError }: AppPreviewProps) => {
     const previews = useStore(workbenchStore.previews);
     const previewHealth = useStore(previewHealthStore);
     const reloadToken = useStore(dockerPreviewReloadToken);
     const previewBusy = useStore(dockerPreviewBusy);
     const startStatus = useStore(dockerStartStatus);
+    const previewRuntimeError = useStore(previewRuntimeErrorStore);
     const iframeRef = useRef<HTMLIFrameElement>(null);
     const [previewBust, setPreviewBust] = useState(() => Date.now());
     const hasSelectedPreview = useRef(false);
@@ -302,6 +317,13 @@ export const AppPreview = memo(
     const [landscape, setLandscape] = useState(false);
     const [inspectorMode, setInspectorMode] = useState(false);
     const [startElapsed, setStartElapsed] = useState(0);
+    const isStreamingRef = useRef(isStreaming);
+    const previewBusyRef = useRef(previewBusy);
+    const previewErrorRetryRef = useRef(0);
+    const pendingPreviewErrorRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    isStreamingRef.current = isStreaming;
+    previewBusyRef.current = previewBusy;
 
     useEffect(() => {
       if (!previewBusy) {
@@ -345,6 +367,59 @@ export const AppPreview = memo(
 
     useEffect(() => {
       workbenchStore.currentView.set('preview');
+    }, []);
+
+    useEffect(() => {
+      const onMessage = (event: MessageEvent) => {
+        if (event.data?.type !== 'BUILDLIVE_PREVIEW_ERROR') {
+          return;
+        }
+
+        const message = typeof event.data.message === 'string' ? event.data.message : '';
+
+        if (!message) {
+          return;
+        }
+
+        if (previewBusyRef.current || isStreamingRef.current) {
+          return;
+        }
+
+        if (pendingPreviewErrorRef.current) {
+          window.clearTimeout(pendingPreviewErrorRef.current);
+        }
+
+        pendingPreviewErrorRef.current = window.setTimeout(() => {
+          pendingPreviewErrorRef.current = null;
+
+          if (previewBusyRef.current || isStreamingRef.current) {
+            return;
+          }
+
+          if (previewErrorRetryRef.current < 1) {
+            previewErrorRetryRef.current += 1;
+            getDockerRuntime().reloadPreview();
+            return;
+          }
+
+          setPreviewRuntimeError({
+            message,
+            filename: typeof event.data.filename === 'string' ? event.data.filename : undefined,
+            lineno: typeof event.data.lineno === 'number' ? event.data.lineno : undefined,
+          });
+        }, 1200);
+      };
+
+      window.addEventListener('message', onMessage);
+
+      return () => {
+        window.removeEventListener('message', onMessage);
+
+        if (pendingPreviewErrorRef.current) {
+          window.clearTimeout(pendingPreviewErrorRef.current);
+          pendingPreviewErrorRef.current = null;
+        }
+      };
     }, []);
 
     const postInspectorState = useCallback((active: boolean) => {
@@ -405,6 +480,17 @@ export const AppPreview = memo(
     const prevHealthRef = useRef(previewHealth.status);
 
     useEffect(() => {
+      clearPreviewRuntimeError();
+    }, [iframeSrc]);
+
+    useEffect(() => {
+      if (isStreaming) {
+        previewErrorRetryRef.current = 0;
+        clearPreviewRuntimeError();
+      }
+    }, [isStreaming]);
+
+    useEffect(() => {
       if (isStreaming || suppressLivePreview) {
         return;
       }
@@ -428,7 +514,8 @@ export const AppPreview = memo(
     }, [previewHealth.status, isStreaming, suppressLivePreview]);
 
     const reload = useCallback(() => {
-      setPreviewBust(Date.now());
+      previewErrorRetryRef.current = 0;
+      getDockerRuntime().reloadPreview();
     }, []);
 
     const retryPreview = useCallback(() => {
@@ -509,7 +596,11 @@ export const AppPreview = memo(
                 )}
                 <p className="text-sm font-medium text-bolt-elements-textPrimary">
                   {previewBusy
-                    ? (SHOW_DOCKER_START_STATUS && startStatus.title) || 'Starting your app…'
+                    ? (SHOW_DOCKER_START_STATUS &&
+                        startStatus.stage !== 'ready' &&
+                        startStatus.stage !== 'idle' &&
+                        startStatus.title) ||
+                      'Starting your app…'
                     : previewHealth.status === 'recovering'
                       ? 'Fixing preview…'
                       : 'Preview not responding'}
@@ -535,6 +626,48 @@ export const AppPreview = memo(
                     Retry preview
                   </button>
                 )}
+              </div>
+            </div>
+          )}
+
+          {!isStreaming &&
+            !previewBusy &&
+            previewHealth.status !== 'recovering' &&
+            previewHealth.status !== 'unreachable' &&
+            previewRuntimeError && (
+            <div
+              className="absolute inset-0 z-20 flex items-center justify-center bg-bolt-elements-background-depth-1/85 px-6 backdrop-blur-sm"
+              role="alert"
+            >
+              <div className="max-w-md rounded-lg border border-red-500/30 bg-bolt-elements-background-depth-2 p-5 text-left shadow-lg">
+                <div className="i-ph:warning-circle mb-3 h-7 w-7 text-red-500" />
+                <p className="text-sm font-medium text-bolt-elements-textPrimary">The preview hit an error</p>
+                <p className="mt-1 text-xs text-bolt-elements-textSecondary">
+                  The page loaded, but the app could not run. Ask BuildLive to fix it — you do not need to open the
+                  browser console.
+                </p>
+                <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-bolt-elements-background-depth-1 px-3 py-2 text-[11px] leading-snug text-bolt-elements-textSecondary">
+                  {previewRuntimeError.message}
+                </pre>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="rounded-md bg-accent-500 px-4 py-2 text-sm font-medium text-white hover:bg-accent-600"
+                    onClick={() => {
+                      onFixPreviewError?.(previewRuntimeError);
+                      clearPreviewRuntimeError();
+                    }}
+                  >
+                    Fix this
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-md border border-bolt-elements-borderColor px-4 py-2 text-sm text-bolt-elements-textPrimary hover:bg-bolt-elements-item-backgroundActive"
+                    onClick={() => clearPreviewRuntimeError()}
+                  >
+                    Dismiss
+                  </button>
+                </div>
               </div>
             </div>
           )}

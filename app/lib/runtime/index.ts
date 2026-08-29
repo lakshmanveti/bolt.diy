@@ -82,6 +82,19 @@ export function getDockerRuntime(): DockerRuntime {
   return getDockerRuntimeInstance();
 }
 
+/** Tear down the Docker session for a deleted chat. Never throws. */
+export async function destroyDaemonSessionForChat(chatId: string | undefined): Promise<void> {
+  if (!chatId || typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    await getDockerRuntimeInstance().destroySessionForChat(chatId);
+  } catch {
+    // ignore
+  }
+}
+
 /** WebContainer disabled — callers should use DockerRuntime / workbench FilesStore. */
 export function getWebContainerPromise(): Promise<WebContainer> {
   const err = new Error('WebContainer is disabled in BuildLive. Use the Docker runtime.');

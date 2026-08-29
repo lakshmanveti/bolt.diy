@@ -4,6 +4,7 @@
 
 import type { Message } from 'ai';
 import type { IChatMetadata } from './db'; // Import IChatMetadata
+import { destroyDaemonSessionForChat } from '~/lib/runtime';
 
 export interface ChatMessage {
   id: string;
@@ -103,7 +104,7 @@ export async function saveChat(db: IDBDatabase, chat: Chat): Promise<void> {
  * @returns A promise that resolves when the chat is deleted
  */
 export async function deleteChat(db: IDBDatabase, id: string): Promise<void> {
-  return new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     const transaction = db.transaction(['chats'], 'readwrite');
     const store = transaction.objectStore('chats');
     const request = store.delete(id);
@@ -116,6 +117,8 @@ export async function deleteChat(db: IDBDatabase, id: string): Promise<void> {
       reject(request.error);
     };
   });
+
+  await destroyDaemonSessionForChat(id);
 }
 
 /**
@@ -124,7 +127,9 @@ export async function deleteChat(db: IDBDatabase, id: string): Promise<void> {
  * @returns A promise that resolves when all chats are deleted
  */
 export async function deleteAllChats(db: IDBDatabase): Promise<void> {
-  return new Promise((resolve, reject) => {
+  const chats = await getAllChats(db);
+
+  await new Promise<void>((resolve, reject) => {
     const transaction = db.transaction(['chats'], 'readwrite');
     const store = transaction.objectStore('chats');
     const request = store.clear();
@@ -137,4 +142,6 @@ export async function deleteAllChats(db: IDBDatabase): Promise<void> {
       reject(request.error);
     };
   });
+
+  await Promise.all(chats.map((chat) => destroyDaemonSessionForChat(chat.id)));
 }
