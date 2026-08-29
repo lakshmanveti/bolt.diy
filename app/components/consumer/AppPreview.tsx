@@ -21,6 +21,7 @@ import { Tooltip } from '~/components/ui/Tooltip';
 import { formatElapsed } from '~/lib/consumer/buildEngagement';
 import { onNewAppClick } from '~/lib/persistence/live-chat-session';
 import { SHOW_DOCKER_START_STATUS } from '~/utils/constants';
+import { mockBuildStore } from '~/lib/consumer/mock-generate';
 
 /**
  * Prefer direct Docker host ports over /embed proxies.
@@ -307,6 +308,8 @@ export const AppPreview = memo(
     const previewBusy = useStore(dockerPreviewBusy);
     const startStatus = useStore(dockerStartStatus);
     const previewRuntimeError = useStore(previewRuntimeErrorStore);
+    const mock = useStore(mockBuildStore);
+    const mockActive = Boolean(import.meta.env.DEV) && mock.active;
     const iframeRef = useRef<HTMLIFrameElement>(null);
     const [previewBust, setPreviewBust] = useState(() => Date.now());
     const hasSelectedPreview = useRef(false);
@@ -551,7 +554,7 @@ export const AppPreview = memo(
       />
     );
 
-    if (!active || suppressLivePreview) {
+    if (mockActive || !active || suppressLivePreview) {
       return (
         <div className="flex h-full w-full flex-col bg-bolt-elements-background-depth-1">
           {toolbar}

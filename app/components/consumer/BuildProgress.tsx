@@ -14,6 +14,7 @@ import {
   formatElapsed,
   summarizeUserPrompt,
 } from '~/lib/consumer/buildEngagement';
+import { mockBuildStore, stopMockGenerate } from '~/lib/consumer/mock-generate';
 
 function collectActions(): ProgressItem[] {
   const artifacts = workbenchStore.artifacts.get();
@@ -260,21 +261,32 @@ export const BuildProgress = memo(
     error,
     onRetry,
   }: BuildProgressProps) => {
-    const items = useBuildProgressItems();
+    const realItems = useBuildProgressItems();
     const previews = useStore(workbenchStore.previews);
     const previewHealth = useStore(previewHealthStore);
-    const startStatus = useStore(dockerStartStatus);
-    const previewBusy = useStore(dockerPreviewBusy);
+    const realStartStatus = useStore(dockerStartStatus);
+    const realPreviewBusy = useStore(dockerPreviewBusy);
     const dockerAvailable = useStore(dockerRuntimeAvailableStore);
-    const hasPreview = previews.some((p) => p.ready && p.baseUrl) && previewHealth.status !== 'unreachable';
+    const mock = useStore(mockBuildStore);
+    const mockActive = Boolean(import.meta.env.DEV) && mock.active;
+    const items = mockActive ? mock.items : realItems;
+    const startStatus = mockActive ? mock.dockerStatus : realStartStatus;
+    const previewBusy = mockActive ? mock.previewBusy : realPreviewBusy;
+    const hasPreview = mockActive
+      ? mock.hasPreview
+      : previews.some((p) => p.ready && p.baseUrl) && previewHealth.status !== 'unreachable';
+    const resolvedAnnotations = mockActive ? mock.annotations : annotations;
+    const resolvedStreaming = mockActive ? mock.isStreaming : isStreaming;
+    const resolvedPrompt = mockActive ? mock.promptSummary : promptSummary;
+    const resolvedError = mockActive ? undefined : error;
     const [expanded, setExpanded] = useState(false);
-    const isRestore = variant === 'restore';
-    const waitingForRuntime = isRestore && !error && !dockerAvailable;
+    const isRestore = mockActive ? false : variant === 'restore';
+    const waitingForRuntime = isRestore && !resolvedError && !dockerAvailable;
 
-    const latestAnnotation = [...annotations].sort((a, b) => b.order - a.order)[0];
+    const latestAnnotation = [...resolvedAnnotations].sort((a, b) => b.order - a.order)[0];
     const active = items.find((i) => i.status === 'running' || i.status === 'pending');
     const awaitingPreviewRuntime =
-      isStreaming ||
+      resolvedStreaming ||
       items.length > 0 ||
       previewBusy ||
       isLiveDockerStartStage(startStatus.stage) ||
@@ -282,7 +294,7 @@ export const BuildProgress = memo(
     const showDockerStatus =
       SHOW_DOCKER_START_STATUS &&
       !hasPreview &&
-      !error &&
+      !resolvedError &&
       !waitingForRuntime &&
       awaitingPreviewRuntime &&
       (isLiveDockerStartStage(startStatus.stage) || previewBusy || isRestore || (items.length > 0 && !active));
@@ -291,28 +303,35 @@ export const BuildProgress = memo(
     const showAccordion = accordionItems.length > 1;
     const doneCount = accordionItems.filter((i) => i.status === 'complete').length;
     const isWaiting =
-      Boolean(error) || waitingForRuntime || !hasPreview || Boolean(active) || isStreaming || previewBusy || isRestore;
-    const buildReady = hasPreview && !active && !isStreaming && !showDockerStatus && !isRestore && !error;
+      Boolean(resolvedError) ||
+      waitingForRuntime ||
+      !hasPreview ||
+      Boolean(active) ||
+      resolvedStreaming ||
+      previewBusy ||
+      isRestore;
+    const buildReady =
+      hasPreview && !active && !resolvedStreaming && !showDockerStatus && !isRestore && !resolvedError;
 
-    const elapsed = useElapsedSeconds(isWaiting && SHOW_BUILD_ENGAGEMENT && !error);
-    const tip = useRotatingTip(isWaiting && SHOW_BUILD_ENGAGEMENT && !error);
-    const summary = SHOW_BUILD_ENGAGEMENT && promptSummary ? summarizeUserPrompt(promptSummary) : '';
+    const elapsed = useElapsedSeconds(isWaiting && SHOW_BUILD_ENGAGEMENT && !resolvedError);
+    const tip = useRotatingTip(isWaiting && SHOW_BUILD_ENGAGEMENT && !resolvedError);
+    const summary = SHOW_BUILD_ENGAGEMENT && resolvedPrompt ? summarizeUserPrompt(resolvedPrompt) : '';
 
     const headline = buildHeadline({
-      error,
+      error: resolvedError,
       waitingForRuntime,
       showDockerStatus,
       dockerTitle: startStatus.title,
       dockerStage: startStatus.stage,
       hasPreview,
       activeLabel: active?.label,
-      isStreaming,
+      isStreaming: resolvedStreaming,
       isRestore,
       latestAnnotation: latestAnnotation?.message,
     });
 
     const detail = buildDetail({
-      error,
+      error: resolvedError,
       waitingForRuntime,
       showDockerStatus,
       dockerDetail: startStatus.detail,
@@ -321,7 +340,12 @@ export const BuildProgress = memo(
     });
 
     const showEmpty =
-      !isRestore && items.length === 0 && !latestAnnotation && !isStreaming && !hasPreview && !showDockerStatus;
+      !isRestore &&
+      items.length === 0 &&
+      !latestAnnotation &&
+      !resolvedStreaming &&
+      !hasPreview &&
+      !showDockerStatus;
 
     if (showEmpty) {
       return (
@@ -340,8 +364,20 @@ export const BuildProgress = memo(
 
     return (
       <div className={classNames('w-full max-w-lg', className)}>
+        {mockActive ? (
+          <div className="mb-4 flex items-center justify-center gap-2 text-[11px] text-bolt-elements-textTertiary">
+            <span>Test generate — no LLM</span>
+            <button
+              type="button"
+              className="rounded px-1.5 py-0.5 text-[11px] font-medium text-bolt-elements-textSecondary hover:bg-bolt-elements-background-depth-2"
+              onClick={stopMockGenerate}
+            >
+              Stop
+            </button>
+          </div>
+        ) : null}
         <div className="flex flex-col items-center text-center mb-6">
-          {error ? (
+          {resolvedError ? (
             <div className="i-ph:warning-circle w-10 h-10 text-red-500 mb-4" />
           ) : buildReady ? (
             <div className="i-ph:check-circle w-10 h-10 text-green-500 mb-4" />
@@ -349,14 +385,14 @@ export const BuildProgress = memo(
             <div className="i-svg-spinners:90-ring-with-bg w-10 h-10 text-accent-500 mb-4" />
           )}
           <p className="text-xs font-semibold uppercase tracking-[0.14em] text-bolt-elements-textTertiary mb-2">
-            {error ? 'Needs attention' : buildReady ? 'Ready' : 'In progress'}
-            {SHOW_BUILD_ENGAGEMENT && isWaiting && !error && elapsed > 0 ? ` · ${formatElapsed(elapsed)}` : ''}
+            {resolvedError ? 'Needs attention' : buildReady ? 'Ready' : 'In progress'}
+            {SHOW_BUILD_ENGAGEMENT && isWaiting && !resolvedError && elapsed > 0 ? ` · ${formatElapsed(elapsed)}` : ''}
           </p>
           <h2 className="text-2xl sm:text-3xl font-semibold text-bolt-elements-textPrimary tracking-tight leading-tight">
             {headline}
           </h2>
           {detail ? <p className="mt-2 text-sm text-bolt-elements-textSecondary">{detail}</p> : null}
-          {summary && isWaiting && !error && (
+          {summary && isWaiting && !resolvedError && (
             <p className="mt-3 text-sm text-bolt-elements-textSecondary max-w-md leading-relaxed">
               Building: <span className="text-bolt-elements-textPrimary">{summary}</span>
             </p>
@@ -414,7 +450,7 @@ export const BuildProgress = memo(
           </div>
         )}
 
-        {error && onRetry ? (
+        {resolvedError && onRetry ? (
           <div className="mt-4">
             <button
               type="button"
@@ -426,7 +462,7 @@ export const BuildProgress = memo(
           </div>
         ) : null}
 
-        {SHOW_BUILD_ENGAGEMENT && isWaiting && !error && (
+        {SHOW_BUILD_ENGAGEMENT && isWaiting && !resolvedError && (
           <div className="mt-5 space-y-3">
             <p
               key={tip}

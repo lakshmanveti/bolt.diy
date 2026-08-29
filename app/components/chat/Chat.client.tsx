@@ -45,6 +45,7 @@ import {
 } from '~/lib/app-starters';
 import { logStore } from '~/lib/stores/logs';
 import { streamingState } from '~/lib/stores/streaming';
+import { stopMockGenerate } from '~/lib/consumer/mock-generate';
 import { filesToArtifacts } from '~/utils/fileUtils';
 import { supabaseConnection } from '~/lib/stores/supabase';
 import { defaultDesignScheme, type DesignScheme } from '~/types/design-scheme';
@@ -62,6 +63,14 @@ export function Chat() {
   const { ready, initialMessages, interrupted, loadError, retryLoad, storeMessageHistory, importChat, exportChat } =
     useChatHistory();
   const title = useStore(description);
+  const prevMixedId = useRef(mixedId);
+
+  useEffect(() => {
+    if (prevMixedId.current !== mixedId) {
+      prevMixedId.current = mixedId;
+      stopMockGenerate();
+    }
+  }, [mixedId]);
 
   if (mixedId && !ready) {
     return <SessionRestoreLoader error={loadError} onRetry={retryLoad} />;
@@ -701,6 +710,8 @@ export const ChatImpl = memo(
         return;
       }
 
+      stopMockGenerate();
+
       if (isSupabaseConfigured() && !chatLlmConfigReady) {
         toast.error('Save your model and API key before chatting');
         return;
@@ -720,6 +731,13 @@ export const ChatImpl = memo(
         clearPendingAppTemplate();
       }
 
+      // Switch to the workbench immediately so the first prompt is not a frozen homepage
+      // while Docker session create / starter matching run (often 1–2s).
+      if (!chatStarted) {
+        setFakeLoading(true);
+        void runAnimation();
+      }
+
       getDockerRuntime().setStreamLocked(true);
       markLiveChatStreaming(true);
 
@@ -727,7 +745,16 @@ export const ChatImpl = memo(
         chatId.set(createChatId());
       }
 
-      await getDockerRuntime().ensureSession(chatId.get());
+      try {
+        await getDockerRuntime().ensureSession(chatId.get());
+      } catch (sessionError) {
+        logger.warn('Failed to start workspace session', sessionError);
+        toast.error('Could not start the workspace. Check that the runtime is running, then try again.');
+        setFakeLoading(false);
+        markLiveChatStreaming(false);
+        getDockerRuntime().setStreamLocked(false);
+        return;
+      }
 
       let finalMessageContent = messageContent;
 
@@ -738,11 +765,7 @@ export const ChatImpl = memo(
         finalMessageContent = messageContent + elementInfo;
       }
 
-      runAnimation();
-
       if (!chatStarted) {
-        setFakeLoading(true);
-
         const finishFirstPromptUi = () => {
           setInput('');
           Cookies.remove(PROMPT_COOKIE_KEY);

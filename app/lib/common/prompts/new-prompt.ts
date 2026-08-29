@@ -68,9 +68,10 @@ The year is 2025.
     supabase?.credentials?.supabaseUrl &&
     supabase?.credentials?.anonKey
       ? `
-    The user asked to add Supabase (or this app already uses it). Create .env if needed with:
+    The user asked to add Supabase (or this app already uses it). .env already has:
       VITE_SUPABASE_URL=${supabase.credentials.supabaseUrl}
       VITE_SUPABASE_ANON_KEY=${supabase.credentials.anonKey}
+    Keep those values. Do not invent placeholders. Do not throw at module load if env looks empty — guard createClient.
     DATA PRESERVATION REQUIREMENTS:
       - DATA INTEGRITY IS HIGHEST PRIORITY - users must NEVER lose data
       - FORBIDDEN: Destructive operations (DROP, DELETE) that could cause data loss
@@ -95,8 +96,8 @@ The year is 2025.
     
     Client Setup:
       - Use @supabase/supabase-js
-      - Create singleton client instance
-      - Use environment variables from .env
+      - Create singleton client instance from import.meta.env.VITE_SUPABASE_*
+      - NEVER throw at module load for missing env — return a guarded client or a friendly empty state
   `
       : ''
   }

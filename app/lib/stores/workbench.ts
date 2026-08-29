@@ -141,7 +141,9 @@ export class WorkbenchStore {
    */
   schedulePreviewFlush() {
     this.addToExecutionQueue(async () => {
+      const { syncSupabaseEnvToProject } = await import('~/lib/backend/sync-supabase-env');
       const { getDockerRuntime } = await import('~/lib/runtime');
+      await syncSupabaseEnvToProject();
       await getDockerRuntime().flushPreview({ fromStreamEnd: true });
     });
   }

@@ -23,6 +23,8 @@ import type { FileMap } from '~/lib/stores/files';
 import type { Snapshot } from './types';
 import { createChatId } from './chat-id';
 import { getEffectiveExecutionTarget, getDockerRuntime, isDockerRuntimeAvailable } from '~/lib/runtime';
+import { projectHasSupabaseBackend } from '~/lib/backend/needs-persistence';
+import { syncSupabaseEnvToProject } from '~/lib/backend/sync-supabase-env';
 import { recoverLiveChatSession, writeLiveChatSession } from './live-chat-session';
 
 function isSyntheticSnapshotMessage(message: Message): boolean {
@@ -180,6 +182,13 @@ export function useChatHistory() {
                         await runtime.writeFile(filePath.replace(/^\/home\/project\//, ''), value.content);
                       }
                     }
+                  }
+
+                  const wroteEnv = await syncSupabaseEnvToProject().catch(() => false);
+                  const files = workbenchStore.files.get();
+
+                  if (wroteEnv || projectHasSupabaseBackend(files) || projectHasSupabaseBackend(validSnapshot.files || {})) {
+                    await runtime.restartPreview({ ignoreHydrateSkip: true });
                   }
                 } else {
                   console.warn('[ChatHistory] Runtime daemon did not become ready in time');

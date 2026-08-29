@@ -30,9 +30,10 @@ You are ${APP_NAME}, an expert AI assistant and exceptional senior software deve
     supabase?.credentials?.supabaseUrl &&
     supabase?.credentials?.anonKey
       ? `
-    The user asked to add Supabase (or this app already uses it). .env:
+    The user asked to add Supabase (or this app already uses it). .env already has:
     VITE_SUPABASE_URL=${supabase.credentials.supabaseUrl}
     VITE_SUPABASE_ANON_KEY=${supabase.credentials.anonKey}
+    Keep those values. Do not invent placeholders. Do not throw at module load if env looks empty — guard createClient.
     For EVERY database change provide BOTH:
       1. <boltAction type="supabase" operation="migration" filePath="/supabase/migrations/your_migration.sql">
       2. <boltAction type="supabase" operation="query" projectId="\${projectId}">

@@ -38,6 +38,12 @@ import { HeadlessBoltTerminal } from './HeadlessBoltTerminal.client';
 import { AddBackendCard } from './AddBackendCard';
 import { useAddBackendPrompt } from './useAddBackendPrompt';
 import { formatPreviewErrorFollowup } from '~/lib/stores/preview-runtime-error';
+import { syncSupabaseEnvToProject } from '~/lib/backend/sync-supabase-env';
+import {
+  consumeQueuedMockGenerate,
+  mockBuildStore,
+  startMockGenerate,
+} from '~/lib/consumer/mock-generate';
 
 const TEXTAREA_MIN_HEIGHT = 76;
 const TEXTAREA_MAX_HEIGHT = 160;
@@ -162,6 +168,18 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
     const [showJumpToLatest, setShowJumpToLatest] = useState(false);
     const addBackend = useAddBackendPrompt(Boolean(isStreaming));
     const followupRequested = useStore(addBackendFollowupRequest);
+    const mock = useStore(mockBuildStore);
+    const mockActive = Boolean(import.meta.env.DEV) && mock.active;
+
+    useEffect(() => {
+      if (!import.meta.env.DEV) {
+        return;
+      }
+
+      if (consumeQueuedMockGenerate()) {
+        startMockGenerate();
+      }
+    }, []);
 
     const handleAddBackend = useCallback(() => {
       if (!addBackend.connected) {
@@ -169,8 +187,10 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
         return;
       }
 
-      sendMessage?.({} as any, addBackend.followup);
-      addBackend.complete();
+      void syncSupabaseEnvToProject().finally(() => {
+        sendMessage?.({} as any, addBackend.followup);
+        addBackend.complete();
+      });
     }, [addBackend, sendMessage]);
 
     useEffect(() => {
@@ -179,8 +199,10 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
       }
 
       consumeAddBackendFollowup();
-      sendMessage?.({} as any, addBackend.followup);
-      addBackend.complete();
+      void syncSupabaseEnvToProject().finally(() => {
+        sendMessage?.({} as any, addBackend.followup);
+        addBackend.complete();
+      });
     }, [addBackend, followupRequested, sendMessage]);
 
     const handleFixPreviewError = useCallback(
@@ -392,7 +414,7 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
       }
     };
 
-    const activeSession = Boolean(chatStarted || isStreaming || (messages && messages.length > 0));
+    const activeSession = mockActive || Boolean(chatStarted || isStreaming || (messages && messages.length > 0));
     const messageCount = messages?.length ?? 0;
     const lastMessageRole = messages?.[messageCount - 1]?.role;
     const latestUserPrompt = (() => {

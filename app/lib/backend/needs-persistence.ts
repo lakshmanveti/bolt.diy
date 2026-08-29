@@ -92,7 +92,7 @@ export function projectNeedsPersistence(files: FileMap): boolean {
 }
 
 export const ADD_BACKEND_FOLLOWUP =
-  'Keep the current UI. Add Supabase so this app\'s forms and CRUD data persist. Create SQL migrations, wire @supabase/supabase-js using the connected project, add RLS policies, and do not rebuild the app from scratch.';
+  "Keep the current UI. Add Supabase so this app's forms and CRUD data persist. Use the VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY already in .env (do not invent placeholders or throw if they look missing). Create SQL migrations, wire @supabase/supabase-js, add RLS policies, and do not rebuild the app from scratch.";
 
 export function isAddBackendRequest(text: string): boolean {
   const value = text.trim();

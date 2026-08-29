@@ -493,7 +493,35 @@ export class DockerRuntime implements AppRuntime {
    * Force a fresh preview document load so disk changes are visible (no HMR).
    */
   reloadPreview(): void {
-    this.#schedulePreviewRedeploy(0);
+    void this.restartPreview({ ignoreHydrateSkip: true });
+  }
+
+  /**
+   * Kill and boot Vite again. Used after .env writes and on chat reopen so
+   * import.meta.env is not stuck from the previous process.
+   */
+  async restartPreview(options?: { ignoreHydrateSkip?: boolean }): Promise<PreviewInfoEvent | null> {
+    if (this.#hydrateSkipWrites && !options?.ignoreHydrateSkip) {
+      return null;
+    }
+
+    this.#streamLocked = false;
+    this.#setPreviewBusy(true);
+
+    try {
+      const preview = await this.#restartPreviewProcess();
+
+      if (preview) {
+        return preview;
+      }
+
+      this.#markPreviewPending();
+      return null;
+    } finally {
+      if (!this.#waitingForPreview) {
+        this.#setPreviewBusy(false);
+      }
+    }
   }
 
   /**
@@ -527,8 +555,13 @@ export class DockerRuntime implements AppRuntime {
 
     await this.#withPreviewLock(async () => undefined);
 
-    if (this.#lastPreviewUrl && (await verifyPreviewReachable(this.#lastPreviewUrl))) {
+    const needsRestart = this.#filesWrittenSinceRedeploy || Boolean(this.#pendingStartCommand);
+
+    // A reachable old Vite URL is not enough after file writes: .env and new
+    // deps are only picked up after a process restart.
+    if (!needsRestart && this.#lastPreviewUrl && (await verifyPreviewReachable(this.#lastPreviewUrl))) {
       this.#bumpReloadToken();
+      this.#setPreviewBusy(false);
       return;
     }
 
@@ -539,7 +572,7 @@ export class DockerRuntime implements AppRuntime {
       return;
     }
 
-    if (this.#filesWrittenSinceRedeploy || !this.#lastPreviewUrl) {
+    if (needsRestart || !this.#lastPreviewUrl) {
       const preview = await this.#restartPreviewProcess();
 
       if (preview) {
@@ -552,7 +585,11 @@ export class DockerRuntime implements AppRuntime {
         console.warn('[DockerRuntime] fallback start failed', error);
         this.#beginPreviewWatch();
       }
+
+      return;
     }
+
+    this.#setPreviewBusy(false);
   }
 
   /**
@@ -568,15 +605,6 @@ export class DockerRuntime implements AppRuntime {
 
     if (this.#waitingForPreview || this.#previewWatchRunning) {
       return null;
-    }
-
-    if (this.#lastPreviewUrl && (await verifyPreviewReachable(this.#lastPreviewUrl))) {
-      this.#bumpReloadToken();
-      return {
-        port: this.#lastPreviewPort || 5173,
-        ready: true,
-        baseUrl: this.#lastPreviewUrl,
-      };
     }
 
     this.#setPreviewBusy(true);
@@ -763,7 +791,8 @@ export class DockerRuntime implements AppRuntime {
           startedAt: dockerStartStatus.get().startedAt || Date.now(),
         }),
       );
-      this.#setPreviewBusy(true);
+      // Do not mark busy here — flushPreview restarts after the stream.
+      // Leaving busy=true with no watch is what stuck "Starting your app…".
       return;
     }
 

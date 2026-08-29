@@ -1075,7 +1075,9 @@ async function refreshStartStatusFromLog(session) {
 
 async function startCommand(session, command) {
   const logPath = path.posix.join(CONTAINER_WORKDIR, START_LOG_FILENAME);
-  const wrapped = `nohup bash -lc ${JSON.stringify(command)} > ${logPath} 2>&1 &`;
+  // Source .env so Vite sees VITE_* on boot (it does not pick up .env written after start).
+  const sourced = `cd ${JSON.stringify(CONTAINER_WORKDIR)} && set -a && [ -f .env ] && . ./.env && [ -f .env.local ] && . ./.env.local; set +a; ${command}`;
+  const wrapped = `nohup bash -lc ${JSON.stringify(sourced)} > ${logPath} 2>&1 &`;
   return dockerExec(session, wrapped, { detach: false });
 }
 

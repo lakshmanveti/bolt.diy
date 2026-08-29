@@ -12,6 +12,14 @@ import { classNames } from '~/utils/classNames';
 import { useStore } from '@nanostores/react';
 import { AuthButton } from '~/components/auth/AuthButton';
 import { BuildLiveLogo } from '~/components/ui/BuildLiveLogo';
+import { consumerUiMode } from '~/lib/consumer/mode';
+import {
+  mockBuildStore,
+  queueMockGenerateAfterNavigation,
+  startMockGenerate,
+  stopMockGenerate,
+} from '~/lib/consumer/mock-generate';
+import { streamingState } from '~/lib/stores/streaming';
 import { closeSidebar, sidebarOpenStore } from '~/lib/stores/sidebar';
 
 const menuVariants = {
@@ -46,6 +54,7 @@ export const Menu = () => {
   const [list, setList] = useState<ChatHistoryItem[]>([]);
   const [listLoading, setListLoading] = useState(false);
   const open = useStore(sidebarOpenStore);
+  const mock = useStore(mockBuildStore);
   const [dialogContent, setDialogContent] = useState<DialogContent>(null);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
@@ -294,6 +303,33 @@ export const Menu = () => {
     loadEntries(); // Reload the list after duplication
   };
 
+  const handleTestGenerate = useCallback(() => {
+    if (!import.meta.env.DEV) {
+      return;
+    }
+
+    if (mock.active) {
+      stopMockGenerate();
+      closeSidebar();
+      return;
+    }
+
+    if (streamingState.get()) {
+      toast.info('Finish the current generate before starting a test');
+      return;
+    }
+
+    closeSidebar();
+
+    if (consumerUiMode.get() === 'studio') {
+      queueMockGenerateAfterNavigation();
+      window.location.assign('/');
+      return;
+    }
+
+    startMockGenerate();
+  }, [mock.active]);
+
   const setDialogContentWithLogging = useCallback((content: DialogContent) => {
     console.log('Setting dialog content:', content);
     setDialogContent(content);
@@ -360,6 +396,17 @@ export const Menu = () => {
                 <span className={selectionMode ? 'i-ph:x h-4 w-4' : 'i-ph:check-square h-4 w-4'} />
               </button>
             </div>
+            {import.meta.env.DEV ? (
+              <button
+                type="button"
+                onClick={handleTestGenerate}
+                className="flex w-full gap-2 items-center justify-center rounded-md border border-dashed border-bolt-elements-borderColor bg-transparent px-4 py-2 text-bolt-elements-textSecondary hover:bg-bolt-elements-background-depth-2 hover:text-bolt-elements-textPrimary transition-colors"
+                title="Play first-run build UI without calling the LLM"
+              >
+                <span className="inline-block i-ph:flask h-4 w-4" />
+                <span className="text-sm font-medium">{mock.active ? 'Stop test' : 'Test'}</span>
+              </button>
+            ) : null}
             <div className="relative w-full">
               <div className="absolute left-3 top-1/2 -translate-y-1/2">
                 <span className="i-ph:magnifying-glass h-4 w-4 text-bolt-elements-textTertiary" />
