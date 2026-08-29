@@ -81,6 +81,7 @@ The year is 2025.
       SQL Migrations - CRITICAL: For EVERY database change, provide TWO actions:
         1. Migration File: <boltAction type="supabase" operation="migration" filePath="/supabase/migrations/name.sql">
         2. Query Execution: <boltAction type="supabase" operation="query" projectId="\${projectId}">
+        Never write supabase/migrations/*.sql as a regular file action. The query action is required so the user can confirm and apply SQL.
       
       Migration Rules:
         - NEVER use diffs, ALWAYS provide COMPLETE file content

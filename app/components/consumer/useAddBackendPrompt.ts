@@ -6,7 +6,8 @@ import { chatId } from '~/lib/persistence/useChatHistory';
 import { dockerPreviewBusy } from '~/lib/runtime';
 import {
   projectHasSourceFiles,
-  projectHasSupabaseBackend,
+  projectHasSupabaseClient,
+  projectHasSupabaseMigrations,
   projectNeedsPersistence,
   ADD_BACKEND_FOLLOWUP,
 } from '~/lib/backend/needs-persistence';
@@ -59,7 +60,8 @@ export function useAddBackendPrompt(isStreaming: boolean) {
   const [eligible, setEligible] = useState<boolean | null>(null);
 
   const previewReady = previews.some((preview) => preview.ready && Boolean(preview.baseUrl));
-  const alreadyWired = useMemo(() => projectHasSupabaseBackend(files), [files]);
+  const hasMigrations = useMemo(() => projectHasSupabaseMigrations(files), [files]);
+  const hasClient = useMemo(() => projectHasSupabaseClient(files), [files]);
   const hasSources = useMemo(() => projectHasSourceFiles(files), [files]);
   const connected = Boolean(connection.token && connection.selectedProjectId);
 
@@ -69,12 +71,12 @@ export function useAddBackendPrompt(isStreaming: boolean) {
   }, [currentChatId]);
 
   useEffect(() => {
-    if (eligible === true || isStreaming || previewBusy || !previewReady || !hasSources || alreadyWired) {
+    if (eligible === true || isStreaming || previewBusy || !previewReady || !hasSources || hasMigrations) {
       return;
     }
 
     const timer = window.setTimeout(() => {
-      if (!projectNeedsPersistence(files)) {
+      if (!projectNeedsPersistence(files) && !projectHasSupabaseClient(files)) {
         return;
       }
 
@@ -83,7 +85,7 @@ export function useAddBackendPrompt(isStreaming: boolean) {
     }, 800);
 
     return () => window.clearTimeout(timer);
-  }, [alreadyWired, currentChatId, eligible, files, hasSources, isStreaming, previewBusy, previewReady]);
+  }, [currentChatId, eligible, files, hasMigrations, hasSources, isStreaming, previewBusy, previewReady]);
 
   const visible =
     eligible === true &&
@@ -91,7 +93,7 @@ export function useAddBackendPrompt(isStreaming: boolean) {
     status !== 'completed' &&
     !isStreaming &&
     previewReady &&
-    !alreadyWired;
+    !hasMigrations;
 
   const dismiss = useCallback(() => {
     writeSession(statusKey(currentChatId), 'dismissed');
@@ -110,7 +112,8 @@ export function useAddBackendPrompt(isStreaming: boolean) {
   return {
     visible,
     connected,
-    backendEnabled: alreadyWired || status === 'completed',
+    finishSetup: hasClient && !hasMigrations,
+    backendEnabled: hasMigrations || hasClient || status === 'completed',
     dismiss,
     complete,
     followup: ADD_BACKEND_FOLLOWUP,

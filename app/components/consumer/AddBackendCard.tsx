@@ -2,11 +2,20 @@ import { classNames } from '~/utils/classNames';
 
 interface AddBackendCardProps {
   connected: boolean;
+  finishSetup?: boolean;
   onPrimary: () => void;
   onDismiss: () => void;
 }
 
-export function AddBackendCard({ connected, onPrimary, onDismiss }: Readonly<AddBackendCardProps>) {
+export function AddBackendCard({ connected, finishSetup, onPrimary, onDismiss }: Readonly<AddBackendCardProps>) {
+  let primaryLabel = 'Add backend to this app';
+
+  if (connected) {
+    primaryLabel = 'Continue';
+  } else if (finishSetup) {
+    primaryLabel = 'Finish setup';
+  }
+
   return (
     <div
       className={classNames(
@@ -17,9 +26,13 @@ export function AddBackendCard({ connected, onPrimary, onDismiss }: Readonly<Add
       <div className="flex items-start gap-3">
         <span className="i-ph:database mt-0.5 h-5 w-5 shrink-0 text-accent-500" />
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-bolt-elements-textPrimary">Add a backend to this app</p>
+          <p className="text-sm font-semibold text-bolt-elements-textPrimary">
+            {finishSetup ? 'Finish database setup' : 'Add a backend to this app'}
+          </p>
           <p className="mt-1 text-xs leading-relaxed text-bolt-elements-textSecondary">
-            Data in this preview is only in the browser. Connect Supabase so forms and lists actually save.
+            {finishSetup
+              ? 'The app is wired to Supabase, but tables were not created yet. Continue to generate SQL and apply it.'
+              : 'Data in this preview is only in the browser. Connect Supabase so forms and lists actually save.'}
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <button
@@ -31,7 +44,7 @@ export function AddBackendCard({ connected, onPrimary, onDismiss }: Readonly<Add
                 'hover:bg-bolt-elements-button-primary-backgroundHover',
               )}
             >
-              {connected ? 'Continue' : 'Add backend to this app'}
+              {primaryLabel}
             </button>
             <button
               type="button"

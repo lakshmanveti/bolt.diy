@@ -184,6 +184,11 @@ export class ActionRunner {
         }
         case 'file': {
           await this.#runFileAction(action);
+
+          if (!isStreaming) {
+            await this.#maybeAlertMigrationFile(action);
+          }
+
           break;
         }
         case 'supabase': {
@@ -547,6 +552,39 @@ export class ActionRunner {
 
     return buildResult;
   }
+  async #maybeAlertMigrationFile(action: ActionState) {
+    if (action.type !== 'file') {
+      return;
+    }
+
+    const changeSource = (action as { changeSource?: string }).changeSource;
+
+    if (changeSource === 'supabase' || changeSource === 'auto-save') {
+      return;
+    }
+
+    const { isSupabaseMigrationPath, supabaseActionsAllowed } = await import('~/lib/backend/needs-persistence');
+
+    if (!isSupabaseMigrationPath(action.filePath) || !action.content?.trim()) {
+      return;
+    }
+
+    const { chatId } = await import('~/lib/persistence/useChatHistory');
+    const { workbenchStore } = await import('~/lib/stores/workbench');
+
+    if (!supabaseActionsAllowed(chatId.get(), workbenchStore.files.get())) {
+      return;
+    }
+
+    this.onSupabaseAlert?.({
+      type: 'info',
+      title: 'Supabase Query',
+      description: 'Execute database query',
+      content: action.content,
+      source: 'supabase',
+    });
+  }
+
   async handleSupabaseAction(action: SupabaseAction) {
     const { operation, content, filePath } = action;
     logger.debug('[Supabase Action]:', { operation, filePath, content });

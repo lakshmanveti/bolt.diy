@@ -47,6 +47,8 @@ import { logStore } from '~/lib/stores/logs';
 import { streamingState } from '~/lib/stores/streaming';
 import { stopMockGenerate } from '~/lib/consumer/mock-generate';
 import { filesToArtifacts } from '~/utils/fileUtils';
+import { isAddBackendRequest, markAddBackendRequested } from '~/lib/backend/needs-persistence';
+import { syncSupabaseEnvToProject } from '~/lib/backend/sync-supabase-env';
 import { supabaseConnection } from '~/lib/stores/supabase';
 import { defaultDesignScheme, type DesignScheme } from '~/types/design-scheme';
 import type { ElementInfo } from '~/components/workbench/Inspector';
@@ -743,6 +745,11 @@ export const ChatImpl = memo(
 
       if (!chatId.get()) {
         chatId.set(createChatId());
+      }
+
+      if (isAddBackendRequest(messageContent)) {
+        markAddBackendRequested(chatId.get());
+        void syncSupabaseEnvToProject();
       }
 
       try {

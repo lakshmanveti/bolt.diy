@@ -465,7 +465,7 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
 
     const composer = (
       <div className="flex flex-col gap-2 w-full">
-        {((supabaseAlert && addBackend.backendEnabled) || deployAlert || llmErrorAlert) && (
+        {(supabaseAlert || deployAlert || llmErrorAlert) && (
           <div className="flex flex-col gap-2">
             {deployAlert && (
               <DeployChatAlert
@@ -477,7 +477,7 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
                 }}
               />
             )}
-            {supabaseAlert && addBackend.backendEnabled && (
+            {supabaseAlert && (
               <SupabaseChatAlert
                 alert={supabaseAlert}
                 clearAlert={() => clearSupabaseAlert?.()}
@@ -675,6 +675,7 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
                     {addBackend.visible ? (
                       <AddBackendCard
                         connected={addBackend.connected}
+                        finishSetup={addBackend.finishSetup}
                         onPrimary={handleAddBackend}
                         onDismiss={addBackend.dismiss}
                       />
