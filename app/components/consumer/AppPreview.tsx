@@ -22,6 +22,7 @@ import { formatElapsed } from '~/lib/consumer/buildEngagement';
 import { onNewAppClick } from '~/lib/persistence/live-chat-session';
 import { SHOW_DOCKER_START_STATUS } from '~/utils/constants';
 import { mockBuildStore } from '~/lib/consumer/mock-generate';
+import { ConsumerCodeEditor } from './ConsumerCodeEditor';
 
 /**
  * Prefer direct Docker host ports over /embed proxies.
@@ -115,6 +116,8 @@ function PreviewToolbar({
   onToggleLandscape,
   inspectorMode,
   onToggleInspector,
+  panel,
+  onPanelChange,
 }: {
   readyPreviews: { baseUrl: string; port: number }[];
   activeIndex: number;
@@ -127,10 +130,14 @@ function PreviewToolbar({
   onToggleLandscape: () => void;
   inspectorMode: boolean;
   onToggleInspector: () => void;
+  panel: 'preview' | 'code';
+  onPanelChange: (panel: 'preview' | 'code') => void;
 }) {
+  const showPreviewTools = panel === 'preview' && Boolean(activeBaseUrl);
+
   return (
     <div className="flex items-center gap-2 px-3 py-2 border-b border-bolt-elements-borderColor shrink-0">
-      <div className="flex min-w-0 flex-1 items-center">
+      <div className="flex min-w-0 flex-1 items-center gap-3">
         <a
           href="/"
           className="flex min-w-0 items-center"
@@ -140,6 +147,42 @@ function PreviewToolbar({
         >
           <BuildLiveLogo size="sm" />
         </a>
+        <div
+          className="flex items-center rounded-md border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 p-0.5"
+          role="tablist"
+          aria-label="Workbench view"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={panel === 'preview'}
+            className={classNames(
+              'inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors',
+              panel === 'preview'
+                ? 'bg-accent-500 text-white'
+                : 'text-bolt-elements-textSecondary hover:text-bolt-elements-textPrimary',
+            )}
+            onClick={() => onPanelChange('preview')}
+          >
+            <div className="i-ph:monitor-play w-3.5 h-3.5" />
+            Preview
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={panel === 'code'}
+            className={classNames(
+              'inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors',
+              panel === 'code'
+                ? 'bg-accent-500 text-white'
+                : 'text-bolt-elements-textSecondary hover:text-bolt-elements-textPrimary',
+            )}
+            onClick={() => onPanelChange('code')}
+          >
+            <div className="i-ph:code w-3.5 h-3.5" />
+            Code
+          </button>
+        </div>
       </div>
 
       <div className="flex items-center gap-1.5 shrink-0">
@@ -164,7 +207,7 @@ function PreviewToolbar({
           <div className="i-ph:download-simple w-4 h-4" />
         </ToolbarIconButton>
 
-        {readyPreviews.length > 1 && (
+        {panel === 'preview' && readyPreviews.length > 1 && (
           <select
             className="text-xs bg-bolt-elements-background-depth-2 border border-bolt-elements-borderColor rounded px-2 py-1.5 text-bolt-elements-textPrimary"
             value={activeIndex}
@@ -178,7 +221,7 @@ function PreviewToolbar({
           </select>
         )}
 
-        {activeBaseUrl && (
+        {showPreviewTools && (
           <>
             <ToolbarIconButton
               tooltip={mobileView ? 'Switch to desktop view' : 'Switch to mobile view'}
@@ -309,6 +352,8 @@ export const AppPreview = memo(
     const startStatus = useStore(dockerStartStatus);
     const previewRuntimeError = useStore(previewRuntimeErrorStore);
     const mock = useStore(mockBuildStore);
+    const selectedView = useStore(workbenchStore.currentView);
+    const showCode = selectedView === 'code';
     const mockActive = Boolean(import.meta.env.DEV) && mock.active;
     const iframeRef = useRef<HTMLIFrameElement>(null);
     const [previewBust, setPreviewBust] = useState(() => Date.now());
@@ -366,10 +411,6 @@ export const AppPreview = memo(
     const selectPreview = useCallback((index: number) => {
       hasSelectedPreview.current = true;
       setActiveIndex(index);
-    }, []);
-
-    useEffect(() => {
-      workbenchStore.currentView.set('preview');
     }, []);
 
     useEffect(() => {
@@ -551,8 +592,21 @@ export const AppPreview = memo(
         onToggleLandscape={() => setLandscape((v) => !v)}
         inspectorMode={inspectorMode}
         onToggleInspector={toggleInspector}
+        panel={showCode ? 'code' : 'preview'}
+        onPanelChange={(next) => workbenchStore.currentView.set(next)}
       />
     );
+
+    if (showCode) {
+      return (
+        <div className="flex h-full w-full flex-col bg-bolt-elements-background-depth-1">
+          {toolbar}
+          <div className="relative min-h-0 flex-1">
+            <ConsumerCodeEditor isStreaming={isStreaming} />
+          </div>
+        </div>
+      );
+    }
 
     if (mockActive || !active || suppressLivePreview) {
       return (

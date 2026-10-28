@@ -5,6 +5,7 @@ import { useStore } from '@nanostores/react';
 import { type JSONValue, type Message } from 'ai';
 import { toast } from 'react-toastify';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { streamingState } from '~/lib/stores/streaming';
 import { logStore } from '~/lib/stores/logs'; // Import logStore
 import {
   getMessages,
@@ -176,6 +177,16 @@ export function useChatHistory() {
 
                   if (resume.hasFiles) {
                     runtime.setHydrateSkipWrites(true);
+
+                    try {
+                      const diskFiles = await runtime.listProjectFiles();
+
+                      if (Object.keys(diskFiles).length > 0) {
+                        workbenchStore.hydrateFilesFromDisk(diskFiles);
+                      }
+                    } catch (error) {
+                      console.warn('[ChatHistory] Failed to hydrate files from Docker', error);
+                    }
                   } else {
                     for (const [filePath, value] of Object.entries(validSnapshot.files || {})) {
                       if (value?.type === 'file' && typeof value.content === 'string') {
@@ -350,7 +361,11 @@ export function useChatHistory() {
         }
       }
 
-      takeSnapshot(messages[messages.length - 1].id, workbenchStore.files.get(), _urlId, chatSummary);
+      // File snapshots are huge POSTs. During generation, persistFilesSnapshot
+      // already checkpoints completed files; take a full snapshot when the stream ends.
+      if (!streamingState.get()) {
+        takeSnapshot(messages[messages.length - 1].id, workbenchStore.files.get(), _urlId, chatSummary);
+      }
 
       if (!description.get() && firstArtifact?.title) {
         description.set(firstArtifact?.title);

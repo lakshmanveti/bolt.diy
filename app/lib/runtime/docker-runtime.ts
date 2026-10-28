@@ -118,8 +118,6 @@ export class DockerRuntime implements AppRuntime {
   #waitingForPreview = false;
   #previewWatchId = 0;
   #previewWatchRunning = false;
-  /** After install, call POST /resume once — same attach path as a chat page reload. */
-  #triedResumeAttach = false;
 
   constructor(daemonUrl: string = DEFAULT_RUNTIME_DAEMON_URL) {
     this.#daemonUrl = daemonUrl.replace(/\/$/, '');
@@ -299,7 +297,6 @@ export class DockerRuntime implements AppRuntime {
       this.#lastPreviewPort = undefined;
       this.#pendingStartCommand = undefined;
       this.#waitingForPreview = false;
-      this.#triedResumeAttach = false;
       this.#stopPreviewWatch();
       this.#stopPreviewPolling();
       void import('~/lib/stores/workbench')
@@ -367,7 +364,6 @@ export class DockerRuntime implements AppRuntime {
     this.#lastPreviewUrl = undefined;
     this.#lastPreviewPort = undefined;
     this.#waitingForPreview = false;
-    this.#triedResumeAttach = false;
     this.#hydrateSkipWrites = false;
     this.#stopPreviewWatch();
     dockerPreviewBusy.set(false);
@@ -459,7 +455,11 @@ export class DockerRuntime implements AppRuntime {
     }
   }
 
-  async writeFile(filePath: string, content: string | Uint8Array): Promise<void> {
+  async writeFile(
+    filePath: string,
+    content: string | Uint8Array,
+    options?: { skipRedeploy?: boolean },
+  ): Promise<void> {
     await this.ensureSession();
 
     const normalized = filePath.replace(/\\/g, '/').replace(/^\/home\/project\//, '').replace(/^\//, '');
@@ -479,6 +479,10 @@ export class DockerRuntime implements AppRuntime {
       throw new Error((err as { error?: string }).error || `Failed to write ${normalized}`);
     }
 
+    if (options?.skipRedeploy) {
+      return;
+    }
+
     if (!this.#hydrateSkipWrites && !SKIP_RELOAD_FILES.test(normalized)) {
       this.#filesWrittenSinceRedeploy = true;
 
@@ -487,6 +491,25 @@ export class DockerRuntime implements AppRuntime {
         this.#schedulePreviewRedeploy();
       }
     }
+  }
+
+  /** Read project text files from the session volume (excludes node_modules). */
+  async listProjectFiles(): Promise<Record<string, string>> {
+    await this.ensureSession();
+
+    if (!this.#sessionId) {
+      return {};
+    }
+
+    const res = await fetch(`${this.#daemonUrl}/sessions/${this.#sessionId}/files`);
+
+    if (!res.ok) {
+      return {};
+    }
+
+    const data = (await res.json().catch(() => ({}))) as { files?: Record<string, string> };
+
+    return data.files && typeof data.files === 'object' ? data.files : {};
   }
 
   /**
@@ -820,7 +843,6 @@ export class DockerRuntime implements AppRuntime {
       }
 
       this.#setPreviewBusy(true);
-      this.#triedResumeAttach = false;
       dockerStartStatus.set(formatStartStatus({ stage: 'install', startedAt: Date.now() }));
 
       try {
@@ -926,15 +948,12 @@ export class DockerRuntime implements AppRuntime {
       const installing = stage === 'install' || stage === 'container';
       const waited = Date.now() - startedAt;
 
-      // Same path as a chat page reload: once packages are in, POST /resume
-      // force-probes Vite or soft-starts it. GET /preview alone never did this.
-      if ((stage === 'server' || stage === 'ready') && !this.#triedResumeAttach && this.#sessionKey) {
-        this.#triedResumeAttach = true;
-        const result = await this.resume(this.#sessionKey, { quiet: true });
-
-        if (result.preview?.ready) {
-          return;
-        }
+      // Do not POST /resume here. Resume used to pkill the in-flight
+      // `npm install && npm run dev`, leaving a hollow node_modules and `vite: not found`.
+      if (stage === 'error') {
+        this.#waitingForPreview = false;
+        this.#setPreviewBusy(false);
+        return;
       }
 
       if (!installing || waited >= 20_000) {

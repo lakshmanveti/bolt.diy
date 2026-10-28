@@ -19,11 +19,14 @@ export function parseStartLog(log) {
       continue;
     }
 
+    const isNpmFetch = /npm http fetch|registry\.npmjs\.org/i.test(line);
+
     if (/\bnpm\b|registry\.npmjs\.org|added \d+ packages/i.test(line)) {
       sawNpm = true;
     }
 
-    if (/\bvite\b/i.test(line) || /Local:\s+https?:\/\//.test(line)) {
+    // Download URLs like registry.npmjs.org/vite must not look like the dev server.
+    if (!isNpmFetch && (/\bvite\b/i.test(line) || /Local:\s+https?:\/\//.test(line))) {
       sawVite = true;
     }
 
@@ -47,7 +50,9 @@ export function parseStartLog(log) {
       }
     }
 
-    if (/npm ERR!|ELIFECYCLE|Cannot find package|ECONNREFUSED/i.test(line)) {
+    if (
+      /npm ERR!|ELIFECYCLE|Cannot find package|ECONNREFUSED|vite:\s*not found|not found: vite/i.test(line)
+    ) {
       error = line.slice(0, 180);
     }
   }
@@ -59,7 +64,9 @@ export function parseStartLog(log) {
     stage = 'error';
   } else if (viteReady) {
     stage = 'ready';
-  } else if (sawVite || packagesAdded != null) {
+  } else if (packagesAdded != null && !sawVite) {
+    stage = 'server';
+  } else if (sawVite) {
     stage = 'server';
   } else if (sawNpm || packageName) {
     stage = 'install';

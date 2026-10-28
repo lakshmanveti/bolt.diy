@@ -678,6 +678,37 @@ async function pathExistsInSession(session, relPath) {
   }
 }
 
+/** A node_modules folder is not enough — interrupted installs leave hollow trees. */
+async function sessionHasUsableInstall(session) {
+  return (
+    (await pathExistsInSession(session, 'node_modules/.bin/vite')) ||
+    (await pathExistsInSession(session, 'node_modules/vite/bin/vite.js')) ||
+    (await pathExistsInSession(session, 'node_modules/vite/package.json'))
+  );
+}
+
+async function removeBrokenNodeModules(session) {
+  if (!(await pathExistsInSession(session, 'node_modules')) || (await sessionHasUsableInstall(session))) {
+    return false;
+  }
+
+  console.log(`[runtime-daemon] removing incomplete node_modules for session=${session.id}`);
+
+  try {
+    await dockerExec(session, `rm -rf ${JSON.stringify(`${CONTAINER_WORKDIR}/node_modules`)}`);
+  } catch {
+    // fall through to host delete
+  }
+
+  try {
+    await rm(path.join(session.workdir, 'node_modules'), { recursive: true, force: true });
+  } catch {
+    // Windows bind-mount leftovers are fine; next npm install will reuse the dir
+  }
+
+  return true;
+}
+
 const SESSION_SCAFFOLD_NAMES = new Set([
   SESSION_META_FILENAME,
   STATIC_SERVER_FILENAME,
@@ -743,6 +774,49 @@ function isStaticSiteCommand(command) {
     command.includes(STATIC_SERVER_FILENAME) ||
     /\b(python3?|http\.server|npx\s+(--yes\s+)?serve|php\s+-S)\b/.test(command)
   );
+}
+
+const LIST_SKIP_FILES = new Set([
+  INSPECTOR_SCRIPT_FILENAME,
+  SESSION_META_FILENAME,
+  STATIC_SERVER_FILENAME,
+]);
+const LIST_BINARY_EXT =
+  /\.(png|jpe?g|gif|webp|ico|bmp|woff2?|ttf|eot|otf|mp3|mp4|wav|zip|gz|tgz|wasm|pdf|exe)$/i;
+const LIST_MAX_FILE_BYTES = 512 * 1024;
+const LIST_MAX_FILES = 250;
+
+async function collectSessionTextFiles(session) {
+  const absFiles = await walkFiles(session.workdir);
+  const files = {};
+
+  for (const abs of absFiles) {
+    if (Object.keys(files).length >= LIST_MAX_FILES) {
+      break;
+    }
+
+    const rel = path.relative(session.workdir, abs).replace(/\\/g, '/');
+    const base = path.basename(rel);
+
+    if (
+      LIST_SKIP_FILES.has(base) ||
+      LIST_BINARY_EXT.test(rel) ||
+      rel.startsWith('.buildlive') ||
+      rel.includes('/.buildlive')
+    ) {
+      continue;
+    }
+
+    const buf = await readFile(abs).catch(() => null);
+
+    if (!buf || buf.length > LIST_MAX_FILE_BYTES || buf.includes(0)) {
+      continue;
+    }
+
+    files[rel] = buf.toString('utf8');
+  }
+
+  return files;
 }
 
 async function walkFiles(dir, acc = []) {
@@ -951,7 +1025,7 @@ async function ensureViteReactScaffold(session) {
   const hasMainTsx = await pathExistsInSession(session, 'src/main.tsx');
   const hasMainJsx = await pathExistsInSession(session, 'src/main.jsx');
   const hasIndexHtml = await pathExistsInSession(session, 'index.html');
-  const hasNodeModules = await pathExistsInSession(session, 'node_modules');
+  const hasNodeModules = await sessionHasUsableInstall(session);
 
   if (!hasAppTsx && !hasAppJsx) {
     // Do not invent a placeholder App — empty sessions must wait for generated files.
@@ -1135,6 +1209,10 @@ async function waitForPreview(session, attempts = 30, delayMs = 700) {
       continue;
     }
 
+    if (status?.stage === 'error') {
+      return preview;
+    }
+
     preview = await resolvePreview(session);
     if (preview?.ready) {
       setStartStatus(session, { stage: 'ready', error: null });
@@ -1171,9 +1249,13 @@ async function stopAppProcesses(session) {
 async function restartSession(session) {
   await ensureSessionContainer(session);
 
-  let command = session.lastCommand;
+  await stopAppProcesses(session);
+  await removeBrokenNodeModules(session);
 
-  if (!command) {
+  let command = session.lastCommand;
+  const usable = await sessionHasUsableInstall(session);
+
+  if (!usable || !command) {
     command = await chooseFallbackStart(session);
   }
 
@@ -1181,9 +1263,13 @@ async function restartSession(session) {
     return { ok: false, error: 'No start command for session', preview: null };
   }
 
-  await stopAppProcesses(session);
   await writeFileIfChanged(path.join(session.workdir, 'vite.config.js'), viteConfigSource());
-  setStartStatus(session, { stage: 'server', startedAt: Date.now(), error: null });
+  const needsInstall = /\bnpm install\b/.test(command);
+  setStartStatus(session, {
+    stage: needsInstall ? 'install' : 'server',
+    startedAt: Date.now(),
+    error: null,
+  });
   // Flush host bind-mount writes into the container before Node boots (Windows Docker can lag).
   await dockerExec(session, 'sync || true');
   await dockerExec(session, 'sleep 0.5');
@@ -1294,8 +1380,10 @@ async function destroySessionByChatId(chatKey) {
 
 async function softStartSession(session) {
   await ensureInspectorAssets(session);
+  await stopAppProcesses(session);
+  await removeBrokenNodeModules(session);
 
-  const hasNodeModules = await pathExistsInSession(session, 'node_modules');
+  const hasNodeModules = await sessionHasUsableInstall(session);
   const hasPkg = await pathExistsInSession(session, 'package.json');
   const hasIndex = await pathExistsInSession(session, 'index.html');
   const hasJsx = await sessionHasJsxOrTsx(session);
@@ -1326,7 +1414,6 @@ async function softStartSession(session) {
     startedAt: Date.now(),
   });
 
-  await stopAppProcesses(session);
   await startCommand(session, command);
   session.lastCommand = command;
   const preview = await waitForPreview(session, 24, 500);
@@ -1340,8 +1427,13 @@ async function softStartSession(session) {
 async function resumeSession(session) {
   await ensureSessionContainer(session);
 
-  const hasNodeModules = await pathExistsInSession(session, 'node_modules');
+  const hasNodeModules = await sessionHasUsableInstall(session);
   const hasFiles = await sessionHasAppFiles(session);
+  await refreshStartStatusFromLog(session).catch(() => undefined);
+
+  const stage = session.startStatus?.stage;
+  const startedAt = session.startStatus?.startedAt || 0;
+  const age = Date.now() - startedAt;
 
   // Force an HTTP probe even if start-status still says "server" / "container".
   let preview = await resolvePreview(session, { force: true });
@@ -1367,6 +1459,18 @@ async function resumeSession(session) {
     };
   }
 
+  // Do not pkill an in-flight `npm install && npm run dev` — that leaves a hollow node_modules.
+  if (stage === 'install' || stage === 'container' || (stage === 'server' && age < 90_000)) {
+    return {
+      resumed: false,
+      softStarted: false,
+      hasNodeModules,
+      hasFiles: true,
+      preview: preview || null,
+    };
+  }
+
+  console.log(`[runtime-daemon] resume soft-start session=${session.id} stage=${stage || 'idle'}`);
   const { command, preview: started } = await softStartSession(session);
 
   return {
@@ -1605,6 +1709,12 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'GET' && action === 'files') {
+      const files = await collectSessionTextFiles(session);
+      json(res, 200, { files });
+      return;
+    }
+
     if (req.method === 'PUT' && action === 'files') {
       const body = await readBody(req);
       const files = body.files || {};
@@ -1672,11 +1782,14 @@ const server = createServer(async (req, res) => {
 
       command = withHostFlag(command);
 
+      await stopAppProcesses(session);
+      await removeBrokenNodeModules(session);
+
       // Choose the right runner: Vite for JSX/TSX, static server for plain HTML
       const hasPkg = await pathExistsInSession(session, 'package.json');
       const hasIndex = await pathExistsInSession(session, 'index.html');
       const hasJsx = await sessionHasJsxOrTsx(session);
-      const hasNodeModules = await pathExistsInSession(session, 'node_modules');
+      const hasNodeModules = await sessionHasUsableInstall(session);
 
       if (hasJsx) {
         command = await ensureViteReactScaffold(session);
@@ -1685,12 +1798,10 @@ const server = createServer(async (req, res) => {
         command = await ensureStaticServerScript(session);
         console.log(`[runtime-daemon] static site detected → ${command}`);
       } else if (hasPkg && hasNodeModules && /\bnpm install\b/.test(command)) {
-        // Skip redundant install when deps already present
+        // Skip redundant install when Vite is actually present
         command = command.replace(/\bnpm install\s*&&\s*/g, '');
         console.log(`[runtime-daemon] skip npm install (node_modules present) → ${command}`);
       }
-
-      await stopAppProcesses(session);
 
       command = withInstallProgress(command);
       const needsInstall = /\bnpm install\b/.test(command);

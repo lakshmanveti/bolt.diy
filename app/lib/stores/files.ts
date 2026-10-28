@@ -564,7 +564,9 @@ export class FilesStore {
       const currentFile = this.files.get()[filePath];
       const isLocked = currentFile?.type === 'file' ? currentFile.isLocked : false;
 
-      // In-memory only — Docker volume is written by ActionRunner / DockerRuntime
+      const { getDockerRuntime } = await import('~/lib/runtime');
+      await getDockerRuntime().writeFile(relativePath, content, { skipRedeploy: true });
+
       this.files.setKey(filePath, {
         type: 'file',
         content,
@@ -574,7 +576,7 @@ export class FilesStore {
 
       this.#size = Object.keys(this.files.get()).filter((k) => this.files.get()[k]?.type === 'file').length;
 
-      logger.info('File updated (memory)');
+      logger.info(`File saved: ${relativePath}`);
     } catch (error) {
       logger.error('Failed to update file content\n\n', error);
 

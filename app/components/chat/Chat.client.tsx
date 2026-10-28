@@ -101,9 +101,8 @@ const processSampledMessages = createSampler(
     initialMessages: Message[];
     isLoading: boolean;
     parseMessages: (messages: Message[], isLoading: boolean) => void;
-    storeMessageHistory: (messages: Message[]) => Promise<void>;
   }) => {
-    const { messages, initialMessages, isLoading, parseMessages, storeMessageHistory } = options;
+    const { messages, initialMessages, isLoading, parseMessages } = options;
 
     // Clear restore-skip before parsing new turns so follow-up file writes actually hit Docker
     if (isLoading || messages.length > initialMessages.length) {
@@ -121,13 +120,50 @@ const processSampledMessages = createSampler(
     if (id && messages.length > 0) {
       writeLiveChatSession({ chatId: id, messages, streaming: isLoading });
     }
-
-    if (messages.length > initialMessages.length) {
-      storeMessageHistory(messages).catch((error) => toast.error(error.message));
-    }
   },
   50,
 );
+
+/** Supabase chat/snapshot upserts are full-document POSTs — do not couple them to the 50ms parser. */
+const PERSIST_SAMPLE_MS = 3000;
+
+type PersistMessagesOptions = {
+  messages: Message[];
+  initialMessages: Message[];
+  storeMessageHistory: (messages: Message[]) => Promise<void>;
+};
+
+let persistInFlight: Promise<void> | null = null;
+let persistQueued: PersistMessagesOptions | null = null;
+
+function persistChatHistory(options: PersistMessagesOptions) {
+  const { messages, initialMessages, storeMessageHistory } = options;
+
+  if (messages.length <= initialMessages.length) {
+    return;
+  }
+
+  if (persistInFlight) {
+    persistQueued = options;
+    return;
+  }
+
+  persistInFlight = storeMessageHistory(messages)
+    .catch((error) => toast.error(error.message))
+    .finally(() => {
+      persistInFlight = null;
+
+      if (persistQueued) {
+        const next = persistQueued;
+        persistQueued = null;
+        persistChatHistory(next);
+      }
+    });
+}
+
+const persistSampledMessages = createSampler((options: PersistMessagesOptions) => {
+  persistChatHistory(options);
+}, PERSIST_SAMPLE_MS);
 
 interface ChatProps {
   initialMessages: Message[];
@@ -434,13 +470,30 @@ export const ChatImpl = memo(
         resetParser();
       }
 
+      if (initialMessages.length > 0 && !isLoading) {
+        workbenchStore.setReloadedMessages(initialMessages.map((message) => message.id));
+      }
+
       processSampledMessages({
         messages,
         initialMessages,
         isLoading,
         parseMessages,
-        storeMessageHistory,
       });
+
+      if (isLoading) {
+        persistSampledMessages({
+          messages,
+          initialMessages,
+          storeMessageHistory,
+        });
+      } else {
+        persistChatHistory({
+          messages,
+          initialMessages,
+          storeMessageHistory,
+        });
+      }
     }, [messages, isLoading, parseMessages, resetParser, initialMessages]);
 
     const messagesRef = useRef(messages);

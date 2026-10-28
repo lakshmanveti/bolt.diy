@@ -66,10 +66,15 @@ export function formatStartStatus(raw: {
   }
 
   if (stage === 'error') {
+    const rawError = raw.error || '';
+    const missingVite = /vite:\s*not found|not found: vite/i.test(rawError);
+
     return {
       stage,
       title: 'Couldn’t start the preview',
-      detail: raw.error || 'The preview didn’t start. Try Retry.',
+      detail: missingVite
+        ? 'Packages did not finish installing. Click Retry to install them and start the preview.'
+        : rawError || 'The preview didn’t start. Try Retry.',
       startedAt,
     };
   }

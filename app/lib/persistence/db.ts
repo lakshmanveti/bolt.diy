@@ -437,6 +437,11 @@ async function idbGetSnapshot(db: IDBDatabase, chatId: string): Promise<Snapshot
   });
 }
 
+/** IndexedDB only — use when merging local writes so we do not GET Supabase on every save. */
+export async function getLocalSnapshot(db: IDBDatabase, chatId: string): Promise<Snapshot | undefined> {
+  return idbGetSnapshot(db, chatId);
+}
+
 export async function getSnapshot(db: IDBDatabase, chatId: string): Promise<Snapshot | undefined> {
   if (isSupabaseConfigured()) {
     try {

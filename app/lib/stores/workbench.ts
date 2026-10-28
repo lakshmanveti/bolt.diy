@@ -19,6 +19,12 @@ import Cookies from 'js-cookie';
 import { createSampler } from '~/utils/sampler';
 import type { ActionAlert, DeployAlert, SupabaseAlert } from '~/types/actions';
 import { WORK_DIR } from '~/utils/constants';
+import { streamingState } from '~/lib/stores/streaming';
+import { createScopedLogger } from '~/utils/logger';
+
+const logger = createScopedLogger('WorkbenchStore');
+const AUTO_SAVE_MS = 800;
+const SNAPSHOT_PERSIST_MS = 2500;
 
 const { saveAs } = fileSaver;
 
@@ -64,6 +70,10 @@ export class WorkbenchStore {
   modifiedFiles = new Set<string>();
   artifactIdList: string[] = [];
   #globalExecutionQueue = Promise.resolve();
+  #autoSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  #autoSaveQueue: Promise<void> = Promise.resolve();
+  #snapshotTimer: ReturnType<typeof setTimeout> | undefined;
+  #snapshotQueue: Promise<void> = Promise.resolve();
   constructor() {
     if (import.meta.hot) {
       import.meta.hot.data.artifacts = this.artifacts;
@@ -104,6 +114,27 @@ export class WorkbenchStore {
 
   hydrateFileFromSnapshot(filePath: string, content: string) {
     this.#filesStore.applyRemoteWrite(filePath, content);
+  }
+
+  hydrateFilesFromDisk(files: Record<string, string>) {
+    for (const [filePath, content] of Object.entries(files)) {
+      this.#filesStore.applyRemoteWrite(filePath, content);
+    }
+  }
+
+  async ensureFilesFromDisk() {
+    const currentCount = Object.values(this.files.get()).filter((entry) => entry?.type === 'file').length;
+
+    try {
+      const { getDockerRuntime } = await import('~/lib/runtime');
+      const diskFiles = await getDockerRuntime().listProjectFiles();
+
+      if (Object.keys(diskFiles).length > currentCount) {
+        this.hydrateFilesFromDisk(diskFiles);
+      }
+    } catch (error) {
+      logger.error('Failed to load files from disk', error);
+    }
   }
 
   get currentDocument(): ReadableAtom<EditorDocument | undefined> {
@@ -219,6 +250,7 @@ export class WorkbenchStore {
       const previousUnsavedFiles = this.unsavedFiles.get();
 
       if (unsavedChanges && previousUnsavedFiles.has(currentDocument.filePath)) {
+        this.#scheduleAutoSave();
         return;
       }
 
@@ -231,6 +263,12 @@ export class WorkbenchStore {
       }
 
       this.unsavedFiles.set(newUnsavedFiles);
+    }
+
+    if (this.unsavedFiles.get().size > 0) {
+      this.#scheduleAutoSave();
+    } else {
+      this.#clearAutoSaveTimer();
     }
   }
 
@@ -247,7 +285,71 @@ export class WorkbenchStore {
   }
 
   setSelectedFile(filePath: string | undefined) {
+    void this.flushAutoSave();
     this.#editorStore.setSelectedFile(filePath);
+  }
+
+  #clearAutoSaveTimer() {
+    if (this.#autoSaveTimer) {
+      clearTimeout(this.#autoSaveTimer);
+      this.#autoSaveTimer = undefined;
+    }
+  }
+
+  #scheduleAutoSave() {
+    this.#clearAutoSaveTimer();
+    this.#autoSaveTimer = setTimeout(() => {
+      this.#autoSaveTimer = undefined;
+      void this.flushAutoSave();
+    }, AUTO_SAVE_MS);
+  }
+
+  async flushAutoSave() {
+    this.#clearAutoSaveTimer();
+
+    this.#autoSaveQueue = this.#autoSaveQueue.then(async () => {
+      if (this.unsavedFiles.get().size === 0) {
+        return;
+      }
+
+      try {
+        await this.saveAllFiles();
+      } catch (error) {
+        logger.error('Auto-save failed', error);
+      }
+    });
+
+    await this.#autoSaveQueue;
+  }
+
+  #clearSnapshotTimer() {
+    if (this.#snapshotTimer) {
+      clearTimeout(this.#snapshotTimer);
+      this.#snapshotTimer = undefined;
+    }
+  }
+
+  #scheduleSnapshotPersist() {
+    this.#clearSnapshotTimer();
+    this.#snapshotTimer = setTimeout(() => {
+      this.#snapshotTimer = undefined;
+      void this.#persistSnapshotNow();
+    }, SNAPSHOT_PERSIST_MS);
+  }
+
+  async #persistSnapshotNow() {
+    this.#clearSnapshotTimer();
+
+    this.#snapshotQueue = this.#snapshotQueue.then(async () => {
+      try {
+        const { persistFilesSnapshot } = await import('~/lib/persistence/persist-files-snapshot');
+        await persistFilesSnapshot(this.files.get());
+      } catch (error) {
+        logger.error('Failed to persist file snapshot', error);
+      }
+    });
+
+    await this.#snapshotQueue;
   }
 
   async saveFile(filePath: string) {
@@ -270,6 +372,11 @@ export class WorkbenchStore {
     newUnsavedFiles.delete(filePath);
 
     this.unsavedFiles.set(newUnsavedFiles);
+    this.#scheduleSnapshotPersist();
+  }
+
+  async flushSnapshotPersist() {
+    await this.#persistSnapshotNow();
   }
 
   async saveCurrentDocument() {
@@ -593,7 +700,15 @@ export class WorkbenchStore {
     const skipDockerReplay =
       isReloaded && getEffectiveExecutionTarget() === 'docker';
 
-    if (skipDockerReplay && (data.action.type === 'start' || data.action.type === 'shell')) {
+    if (skipDockerReplay) {
+      if (data.action.type === 'file') {
+        const fullPath = path.join(WORK_DIR, data.action.filePath.replace(/^\//, ''));
+
+        if (!this.#filesStore.getFile(fullPath)) {
+          this.#filesStore.applyRemoteWrite(fullPath, data.action.content);
+        }
+      }
+
       return;
     }
 
@@ -988,3 +1103,15 @@ export class WorkbenchStore {
 }
 
 export const workbenchStore = new WorkbenchStore();
+
+let workbenchWasStreaming = false;
+
+streamingState.subscribe((streaming) => {
+  if (streaming) {
+    workbenchWasStreaming = true;
+    void workbenchStore.flushAutoSave();
+  } else if (workbenchWasStreaming) {
+    workbenchWasStreaming = false;
+    void workbenchStore.flushSnapshotPersist();
+  }
+});
