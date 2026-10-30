@@ -102,6 +102,18 @@ export function isDockerCoveredAction(action: Pick<ActionState, 'type'> & { cont
   return INSTALL_CMD.test(cmd) || DEV_CMD.test(cmd);
 }
 
+/** File steps stay on screen for the whole generate stream and until queued file actions finish. */
+export function fileGenerationStillRunning(
+  streaming: boolean,
+  items: Array<{ status: ActionState['status'] }>,
+): boolean {
+  if (streaming) {
+    return true;
+  }
+
+  return items.some((item) => item.status === 'running' || item.status === 'pending');
+}
+
 export function statusLabel(status: ActionState['status']): string {
   switch (status) {
     case 'pending':

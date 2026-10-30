@@ -7,7 +7,13 @@ import { previewHealthStore } from '~/lib/stores/preview-health';
 import { dockerPreviewBusy, dockerRuntimeAvailableStore, dockerStartStatus, isLiveDockerStartStage } from '~/lib/runtime';
 import { classNames } from '~/utils/classNames';
 import { SHOW_DOCKER_START_STATUS } from '~/utils/constants';
-import { dedupeProgressItems, isDockerCoveredAction, labelForAction, type ProgressItem } from '~/lib/consumer/progressLabels';
+import {
+  dedupeProgressItems,
+  fileGenerationStillRunning,
+  isDockerCoveredAction,
+  labelForAction,
+  type ProgressItem,
+} from '~/lib/consumer/progressLabels';
 import {
   BUILD_WAIT_TIPS,
   SHOW_BUILD_ENGAGEMENT,
@@ -210,7 +216,7 @@ function buildDetail({
   return null;
 }
 
-function dockerStageItems(status: { stage: string; packageName?: string }): ProgressItem[] {
+function dockerStageItems(status: { stage: string }): ProgressItem[] {
   if (status.stage === 'idle' || status.stage === 'ready') {
     return [];
   }
@@ -219,7 +225,7 @@ function dockerStageItems(status: { stage: string; packageName?: string }): Prog
     { id: 'container', label: 'Getting your app ready', stages: ['container', 'install', 'server', 'error'] },
     {
       id: 'install',
-      label: status.packageName ? `Installing ${status.packageName}` : 'Installing packages',
+      label: 'Installing dependencies',
       stages: ['install', 'server', 'error'],
     },
     { id: 'server', label: 'Starting the app', stages: ['server', 'error'] },
@@ -285,6 +291,7 @@ export const BuildProgress = memo(
 
     const latestAnnotation = [...resolvedAnnotations].sort((a, b) => b.order - a.order)[0];
     const active = items.find((i) => i.status === 'running' || i.status === 'pending');
+    const filesGenerating = fileGenerationStillRunning(resolvedStreaming, items);
     const awaitingPreviewRuntime =
       resolvedStreaming ||
       items.length > 0 ||
@@ -296,8 +303,9 @@ export const BuildProgress = memo(
       !hasPreview &&
       !resolvedError &&
       !waitingForRuntime &&
+      !filesGenerating &&
       awaitingPreviewRuntime &&
-      (isLiveDockerStartStage(startStatus.stage) || previewBusy || isRestore || (items.length > 0 && !active));
+      (isLiveDockerStartStage(startStatus.stage) || previewBusy || isRestore || items.length > 0);
     const dockerItems = showDockerStatus ? dockerStageItems(startStatus) : [];
     const accordionItems = (items.length > 1 ? items : dockerItems).slice().reverse();
     const showAccordion = accordionItems.length > 1;

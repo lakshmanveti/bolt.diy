@@ -6,10 +6,12 @@ import { workbenchStore } from '~/lib/stores/workbench';
 import { dockerPreviewBusy, dockerPreviewReloadToken, dockerStartStatus, getDockerRuntime } from '~/lib/runtime';
 import { previewHealthStore } from '~/lib/stores/preview-health';
 import {
+  classifyPreviewErrorReport,
   clearPreviewRuntimeError,
   previewRuntimeErrorStore,
   setPreviewRuntimeError,
 } from '~/lib/stores/preview-runtime-error';
+import type { PreviewRuntimeError } from '~/lib/stores/preview-runtime-error';
 import { retryPreviewRecovery } from '~/lib/stores/previews';
 import { classNames } from '~/utils/classNames';
 import { Inspector, type ElementInfo } from '~/components/workbench/Inspector';
@@ -367,8 +369,11 @@ export const AppPreview = memo(
     const [startElapsed, setStartElapsed] = useState(0);
     const isStreamingRef = useRef(isStreaming);
     const previewBusyRef = useRef(previewBusy);
-    const previewErrorRetryRef = useRef(0);
-    const pendingPreviewErrorRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const hasLivePreviewRef = useRef(false);
+    const queuedPreviewErrorRef = useRef<PreviewRuntimeError | null>(null);
+    const dismissedPreviewErrorRef = useRef<string | null>(null);
+    const brokenPreviewRef = useRef(false);
+    const [coverBrokenPreview, setCoverBrokenPreview] = useState(false);
 
     isStreamingRef.current = isStreaming;
     previewBusyRef.current = previewBusy;
@@ -413,58 +418,75 @@ export const AppPreview = memo(
       setActiveIndex(index);
     }, []);
 
+    const showPreviewError = useCallback((error: PreviewRuntimeError) => {
+      queuedPreviewErrorRef.current = null;
+      brokenPreviewRef.current = true;
+      setCoverBrokenPreview(true);
+      setSuppressLivePreview(false);
+      setPreviewRuntimeError(error);
+    }, []);
+
     useEffect(() => {
       const onMessage = (event: MessageEvent) => {
+        if (event.data?.type === 'BUILDLIVE_PREVIEW_RECOVERED') {
+          queuedPreviewErrorRef.current = null;
+          brokenPreviewRef.current = false;
+          setCoverBrokenPreview(false);
+          clearPreviewRuntimeError();
+
+          if (isStreamingRef.current) {
+            setSuppressLivePreview(!hasLivePreviewRef.current);
+          } else {
+            setSuppressLivePreview(false);
+          }
+
+          return;
+        }
+
         if (event.data?.type !== 'BUILDLIVE_PREVIEW_ERROR') {
           return;
         }
 
-        const message = typeof event.data.message === 'string' ? event.data.message : '';
+        const message = typeof event.data.message === 'string' ? event.data.message.trim() : '';
+        const action = classifyPreviewErrorReport({
+          message,
+          streaming: isStreamingRef.current,
+          previewBusy: previewBusyRef.current,
+          dismissedMessage: dismissedPreviewErrorRef.current,
+        });
 
-        if (!message) {
+        if (action === 'ignore') {
           return;
         }
 
-        if (previewBusyRef.current || isStreamingRef.current) {
+        const error: PreviewRuntimeError = {
+          message,
+          filename: typeof event.data.filename === 'string' && event.data.filename ? event.data.filename : undefined,
+          lineno: typeof event.data.lineno === 'number' && event.data.lineno > 0 ? event.data.lineno : undefined,
+        };
+
+        // Hide the Vite overlay immediately. The confirmation is shown once the
+        // follow-up has finished and the preview is idle.
+        brokenPreviewRef.current = true;
+        setCoverBrokenPreview(true);
+
+        if (action === 'queue') {
+          queuedPreviewErrorRef.current = error;
+
+          if (isStreamingRef.current) {
+            setSuppressLivePreview(true);
+          }
+
           return;
         }
 
-        if (pendingPreviewErrorRef.current) {
-          window.clearTimeout(pendingPreviewErrorRef.current);
-        }
-
-        pendingPreviewErrorRef.current = window.setTimeout(() => {
-          pendingPreviewErrorRef.current = null;
-
-          if (previewBusyRef.current || isStreamingRef.current) {
-            return;
-          }
-
-          if (previewErrorRetryRef.current < 1) {
-            previewErrorRetryRef.current += 1;
-            getDockerRuntime().reloadPreview();
-            return;
-          }
-
-          setPreviewRuntimeError({
-            message,
-            filename: typeof event.data.filename === 'string' ? event.data.filename : undefined,
-            lineno: typeof event.data.lineno === 'number' ? event.data.lineno : undefined,
-          });
-        }, 1200);
+        showPreviewError(error);
       };
 
       window.addEventListener('message', onMessage);
 
-      return () => {
-        window.removeEventListener('message', onMessage);
-
-        if (pendingPreviewErrorRef.current) {
-          window.clearTimeout(pendingPreviewErrorRef.current);
-          pendingPreviewErrorRef.current = null;
-        }
-      };
-    }, []);
+      return () => window.removeEventListener('message', onMessage);
+    }, [showPreviewError]);
 
     const postInspectorState = useCallback((active: boolean) => {
       iframeRef.current?.contentWindow?.postMessage(
@@ -504,18 +526,34 @@ export const AppPreview = memo(
 
     const active = readyPreviews[activeIndex] ?? readyPreviews[0];
     const embedUrl = active?.baseUrl ? toEmbeddablePreviewUrl(active.baseUrl) : undefined;
+    hasLivePreviewRef.current = Boolean(active);
 
     useEffect(() => {
       if (isStreaming) {
         if (!streamTurnRef.current) {
           streamTurnRef.current = true;
-          setSuppressLivePreview(!active);
+
+          if (previewRuntimeErrorStore.get() || brokenPreviewRef.current) {
+            brokenPreviewRef.current = true;
+            setCoverBrokenPreview(true);
+            clearPreviewRuntimeError();
+            setSuppressLivePreview(true);
+          } else {
+            setSuppressLivePreview(!active);
+          }
         }
 
         return;
       }
 
       streamTurnRef.current = false;
+
+      if (brokenPreviewRef.current) {
+        setCoverBrokenPreview(true);
+        setSuppressLivePreview(false);
+        return;
+      }
+
       setSuppressLivePreview(false);
     }, [isStreaming, active]);
 
@@ -524,15 +562,66 @@ export const AppPreview = memo(
     const prevHealthRef = useRef(previewHealth.status);
 
     useEffect(() => {
+      queuedPreviewErrorRef.current = null;
+      dismissedPreviewErrorRef.current = null;
       clearPreviewRuntimeError();
+
+      if (!brokenPreviewRef.current) {
+        setCoverBrokenPreview(false);
+        return undefined;
+      }
+
+      setCoverBrokenPreview(true);
+
+      const timer = window.setTimeout(() => {
+        if (!previewRuntimeErrorStore.get() && !queuedPreviewErrorRef.current) {
+          brokenPreviewRef.current = false;
+          setCoverBrokenPreview(false);
+        }
+      }, 2000);
+
+      return () => window.clearTimeout(timer);
     }, [iframeSrc]);
 
     useEffect(() => {
-      if (isStreaming) {
-        previewErrorRetryRef.current = 0;
-        clearPreviewRuntimeError();
+      if (isStreaming || previewBusy) {
+        return undefined;
       }
-    }, [isStreaming]);
+
+      const queued = queuedPreviewErrorRef.current;
+
+      if (!queued) {
+        return undefined;
+      }
+
+      const timer = window.setTimeout(() => {
+        if (isStreamingRef.current || previewBusyRef.current) {
+          return;
+        }
+
+        const current = queuedPreviewErrorRef.current;
+
+        if (!current || current.message === dismissedPreviewErrorRef.current) {
+          return;
+        }
+
+        showPreviewError(current);
+      }, 600);
+
+      return () => window.clearTimeout(timer);
+    }, [isStreaming, previewBusy, iframeSrc, showPreviewError]);
+
+    useEffect(() => {
+      if (isStreaming || previewBusy || !iframeSrc || previewRuntimeError) {
+        return undefined;
+      }
+
+      const timer = window.setTimeout(() => {
+        iframeRef.current?.contentWindow?.postMessage({ type: 'BUILDLIVE_RECHECK_ERRORS' }, '*');
+      }, 400);
+
+      return () => window.clearTimeout(timer);
+    }, [isStreaming, previewBusy, iframeSrc, previewRuntimeError]);
 
     useEffect(() => {
       if (isStreaming || suppressLivePreview) {
@@ -558,7 +647,7 @@ export const AppPreview = memo(
     }, [previewHealth.status, isStreaming, suppressLivePreview]);
 
     const reload = useCallback(() => {
-      previewErrorRetryRef.current = 0;
+      dismissedPreviewErrorRef.current = null;
       getDockerRuntime().reloadPreview();
     }, []);
 
@@ -597,6 +686,8 @@ export const AppPreview = memo(
       />
     );
 
+    const hideBrokenPreview = Boolean(previewRuntimeError) || coverBrokenPreview;
+
     if (showCode) {
       return (
         <div className="flex h-full w-full flex-col bg-bolt-elements-background-depth-1">
@@ -625,15 +716,15 @@ export const AppPreview = memo(
     return (
       <div className="flex h-full w-full flex-col bg-bolt-elements-background-depth-1">
         {toolbar}
-        {liveUi.showBar && embedUrl ? (
+        {liveUi.showBar && embedUrl && !hideBrokenPreview ? (
           <LivePreviewBar previewUrl={embedUrl} onDismiss={liveUi.dismissBar} />
         ) : null}
         <div className="relative min-h-0 flex-1">
           <PreviewBrandBadge />
-          {liveUi.showMoment && embedUrl ? (
+          {liveUi.showMoment && embedUrl && !hideBrokenPreview ? (
             <LivePreviewOverlay previewUrl={embedUrl} onDismiss={liveUi.dismissMoment} />
           ) : null}
-          {inspectorMode && (
+          {inspectorMode && !hideBrokenPreview && (
             <div className="pointer-events-none absolute left-3 right-3 top-3 z-10 rounded-md border border-accent-500/30 bg-accent-500/10 px-3 py-1.5 text-center text-xs text-bolt-elements-textPrimary backdrop-blur-sm">
               Click an element in the app, then describe the change in chat
             </div>
@@ -687,13 +778,9 @@ export const AppPreview = memo(
             </div>
           )}
 
-          {!isStreaming &&
-            !previewBusy &&
-            previewHealth.status !== 'recovering' &&
-            previewHealth.status !== 'unreachable' &&
-            previewRuntimeError && (
+          {previewRuntimeError && (
             <div
-              className="absolute inset-0 z-20 flex items-center justify-center bg-bolt-elements-background-depth-1/85 px-6 backdrop-blur-sm"
+              className="absolute inset-0 z-30 flex items-center justify-center bg-bolt-elements-background-depth-1 px-6"
               role="alert"
             >
               <div className="max-w-md rounded-lg border border-red-500/30 bg-bolt-elements-background-depth-2 p-5 text-left shadow-lg">
@@ -711,6 +798,9 @@ export const AppPreview = memo(
                     type="button"
                     className="rounded-md bg-accent-500 px-4 py-2 text-sm font-medium text-white hover:bg-accent-600"
                     onClick={() => {
+                      brokenPreviewRef.current = true;
+                      setCoverBrokenPreview(true);
+                      setSuppressLivePreview(true);
                       onFixPreviewError?.(previewRuntimeError);
                       clearPreviewRuntimeError();
                     }}
@@ -720,7 +810,12 @@ export const AppPreview = memo(
                   <button
                     type="button"
                     className="rounded-md border border-bolt-elements-borderColor px-4 py-2 text-sm text-bolt-elements-textPrimary hover:bg-bolt-elements-item-backgroundActive"
-                    onClick={() => clearPreviewRuntimeError()}
+                    onClick={() => {
+                      dismissedPreviewErrorRef.current = previewRuntimeError.message;
+                      brokenPreviewRef.current = false;
+                      setCoverBrokenPreview(false);
+                      clearPreviewRuntimeError();
+                    }}
                   >
                     Dismiss
                   </button>
@@ -729,20 +824,37 @@ export const AppPreview = memo(
             </div>
           )}
 
-          {mobileView ? (
-            <MobileFrame src={iframeSrc!} iframeRef={iframeRef} landscape={landscape} />
-          ) : (
-            <iframe
-              ref={iframeRef}
-              key={iframeSrc}
-              className="h-full w-full border-none bg-white"
-              src={iframeSrc}
-              title="App preview"
-              allow="cross-origin-isolated"
-              // @ts-expect-error credentialless is valid for COEP iframes
-              credentialless=""
-            />
+          {!previewRuntimeError && coverBrokenPreview && !previewBusy && !isStreaming && (
+            <div
+              className="absolute inset-0 z-30 flex items-center justify-center bg-bolt-elements-background-depth-1 px-6"
+              role="status"
+            >
+              <div className="max-w-sm text-center">
+                <div className="i-svg-spinners:90-ring-with-bg mx-auto mb-3 h-8 w-8 text-accent-500" />
+                <p className="text-sm font-medium text-bolt-elements-textPrimary">Checking the preview…</p>
+              </div>
+            </div>
           )}
+
+          <div
+            className={classNames('h-full w-full', hideBrokenPreview && 'invisible')}
+            aria-hidden={hideBrokenPreview || undefined}
+          >
+            {mobileView ? (
+              <MobileFrame src={iframeSrc!} iframeRef={iframeRef} landscape={landscape} />
+            ) : (
+              <iframe
+                ref={iframeRef}
+                key={iframeSrc}
+                className="h-full w-full border-none bg-white"
+                src={iframeSrc}
+                title="App preview"
+                allow="cross-origin-isolated"
+                // @ts-expect-error credentialless is valid for COEP iframes
+                credentialless=""
+              />
+            )}
+          </div>
 
           <Inspector isActive={inspectorMode} iframeRef={iframeRef} onElementSelect={handleElementSelect} />
         </div>

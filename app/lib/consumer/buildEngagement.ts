@@ -27,6 +27,68 @@ export function formatElapsed(seconds: number): string {
   return `${m}m ${s.toString().padStart(2, '0')}s`;
 }
 
+type PromptMessage = {
+  role?: string;
+  content?: unknown;
+  annotations?: unknown;
+};
+
+function messageText(content: unknown): string {
+  if (typeof content === 'string') {
+    return content.trim();
+  }
+
+  if (!Array.isArray(content)) {
+    return '';
+  }
+
+  return content
+    .filter(
+      (part): part is { type: string; text: string } =>
+        Boolean(part) &&
+        typeof part === 'object' &&
+        (part as { type?: string }).type === 'text' &&
+        typeof (part as { text?: string }).text === 'string',
+    )
+    .map((part) => part.text)
+    .join(' ')
+    .trim();
+}
+
+/** Template-import prompts are sent as hidden user turns. They are not the app request. */
+export function isInternalUserPrompt(message: PromptMessage): boolean {
+  if (Array.isArray(message.annotations) && message.annotations.includes('hidden')) {
+    return true;
+  }
+
+  const text = messageText(message.content);
+
+  return /TEMPLATE INSTRUCTIONS:/i.test(text) || /template import is done/i.test(text);
+}
+
+/** The app the user asked for, skipping starter-template scaffolding. */
+export function latestVisibleUserPrompt(messages: PromptMessage[] | undefined): string | undefined {
+  if (!messages?.length) {
+    return undefined;
+  }
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+
+    if (message.role !== 'user' || isInternalUserPrompt(message)) {
+      continue;
+    }
+
+    const text = messageText(message.content);
+
+    if (text) {
+      return text;
+    }
+  }
+
+  return undefined;
+}
+
 export function summarizeUserPrompt(raw: string, maxLen = 140): string {
   const cleaned = raw
     .replace(/^\[Model:.*?\]\s*/i, '')

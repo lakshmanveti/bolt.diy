@@ -38,6 +38,19 @@ npm http fetch GET https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-reac
     expect(parsed.error).toBeNull();
   });
 
+  it('does not treat a busy dev port as a fatal install error', () => {
+    const parsed = parseStartLog(`
+> api-key-manager@0.0.1 dev
+> vite --host 0.0.0.0 --port 5173
+
+error when starting dev server:
+Error: Port 5173 is already in use
+`);
+
+    expect(parsed.stage).not.toBe('error');
+    expect(parsed.error).toBeNull();
+  });
+
   it('treats a missing vite binary as an error', () => {
     const parsed = parseStartLog(`
 > vite --host 0.0.0.0 --port 5173 --host 0.0.0.0 --port 5173
@@ -62,10 +75,12 @@ describe('formatStartStatus', () => {
     expect(status.detail.toLowerCase()).toContain('install');
   });
 
-  it('names the current package', () => {
-    const status = formatStartStatus({ stage: 'install', packageName: 'react' });
+  it('uses one install label after packages start downloading', () => {
+    const status = formatStartStatus({ stage: 'install', packageName: 'react', packagesAdded: 12 });
 
-    expect(status.title).toBe('Installing react…');
+    expect(status.title).toBe('Installing dependencies…');
+    expect(status.detail).not.toContain('react');
+    expect(status.detail).not.toContain('12');
   });
 
   it('uses plain language for the workspace boot stage', () => {

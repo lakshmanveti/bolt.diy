@@ -116,6 +116,10 @@ export class DockerRuntime implements AppRuntime {
   #sessionCreate: Promise<void> | undefined;
   /** True after spawn until GET /preview reports HTTP-ready — keep overlay + polling. */
   #waitingForPreview = false;
+  /** One automatic resume per failed boot. A new watch must not fire resume again. */
+  #resumedAfterError = false;
+  /** Resolves when the background npm install spawned from package.json has finished. */
+  #installLoop: Promise<void> | undefined;
   #previewWatchId = 0;
   #previewWatchRunning = false;
 
@@ -178,6 +182,7 @@ export class DockerRuntime implements AppRuntime {
   #markPreviewLive(preview: PreviewInfoEvent) {
     this.#stopPreviewWatch();
     this.#waitingForPreview = false;
+    this.#resumedAfterError = false;
     this.#lastPreviewUrl = undefined;
     this.#emitPreview(preview);
     this.#bumpReloadToken();
@@ -491,6 +496,98 @@ export class DockerRuntime implements AppRuntime {
         this.#schedulePreviewRedeploy();
       }
     }
+
+    // package.json is on disk. Install runs in the background; later files do not wait.
+    if (!this.#hydrateSkipWrites && (normalized === 'package.json' || normalized.endsWith('/package.json'))) {
+      this.trackBackgroundInstall();
+    }
+  }
+
+  /**
+   * Join the daemon's background npm install. Safe to call repeatedly.
+   * Does not block the caller — start/flush await `#awaitInstall`.
+   */
+  trackBackgroundInstall(): void {
+    if (this.#hydrateSkipWrites || this.#installLoop) {
+      return;
+    }
+
+    this.#installLoop = this.#pollBackgroundInstall().finally(() => {
+      this.#installLoop = undefined;
+    });
+  }
+
+  async #awaitInstall(): Promise<void> {
+    if (!this.#installLoop) {
+      return;
+    }
+
+    await this.#installLoop.catch((error) => {
+      console.warn('[DockerRuntime] background install watch failed', error);
+    });
+  }
+
+  async #pollBackgroundInstall(): Promise<void> {
+    const deadline = Date.now() + 10 * 60_000;
+    const startedAt = Date.now();
+    let sawRunning = false;
+    let falseSince = 0;
+
+    while (Date.now() < deadline) {
+      const status = await this.#fetchInstallStatus();
+
+      if (!status) {
+        // Daemon restart refuses the connection. Keep waiting; do not boot Vite yet.
+        falseSince = 0;
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        continue;
+      }
+
+      if (status.running) {
+        sawRunning = true;
+        falseSince = 0;
+        void this.#pullStartStatus();
+      } else if (typeof status.exitCode === 'number') {
+        return;
+      } else if (sawRunning) {
+        // running flipped to false without an exit code — usually a daemon restart mid-install.
+        falseSince = falseSince || Date.now();
+
+        if (Date.now() - falseSince > 20_000) {
+          return;
+        }
+      } else if (Date.now() - startedAt > 8_000) {
+        // Daemon deliberately skipped install (incomplete package.json, or deps already present).
+        return;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+
+  async #fetchInstallStatus(): Promise<{ running: boolean; exitCode: number | null } | null> {
+    if (!this.#sessionId) {
+      return null;
+    }
+
+    try {
+      const res = await fetch(`${this.#daemonUrl}/sessions/${this.#sessionId}/install`, {
+        cache: 'no-store',
+      });
+
+      if (!res.ok) {
+        return null;
+      }
+
+      const data = (await res.json()) as { running?: boolean; exitCode?: number | null };
+
+      return {
+        running: Boolean(data.running),
+        exitCode: typeof data.exitCode === 'number' ? data.exitCode : null,
+      };
+    } catch {
+      return null;
+    }
   }
 
   /** Read project text files from the session volume (excludes node_modules). */
@@ -565,6 +662,8 @@ export class DockerRuntime implements AppRuntime {
     if (!this.#sessionId) {
       return;
     }
+
+    await this.#awaitInstall();
 
     if (this.#waitingForPreview || this.#previewWatchRunning) {
       this.#beginPreviewWatch();
@@ -797,6 +896,10 @@ export class DockerRuntime implements AppRuntime {
   async start(command: string): Promise<PreviewInfoEvent | void> {
     await this.ensureSession();
 
+    if (!this.#streamLocked) {
+      await this.#awaitInstall();
+    }
+
     if (this.#hydrateSkipWrites && this.#lastPreviewUrl) {
       return {
         port: this.#lastPreviewPort || 5173,
@@ -836,6 +939,8 @@ export class DockerRuntime implements AppRuntime {
   }
 
   async #startProcess(command: string): Promise<PreviewInfoEvent | void> {
+    await this.#awaitInstall();
+
     return this.#withPreviewLock(async () => {
       if (this.#streamLocked) {
         this.#pendingStartCommand = command;
@@ -843,10 +948,15 @@ export class DockerRuntime implements AppRuntime {
       }
 
       this.#setPreviewBusy(true);
-      dockerStartStatus.set(formatStartStatus({ stage: 'install', startedAt: Date.now() }));
+      dockerStartStatus.set(
+        formatStartStatus({
+          stage: 'server',
+          startedAt: dockerStartStatus.get().startedAt || Date.now(),
+        }),
+      );
 
       try {
-        const res = await fetch(`${this.#daemonUrl}/sessions/${this.#sessionId}/start`, {
+        const res = await this.#fetchDaemon(`${this.#daemonUrl}/sessions/${this.#sessionId}/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ command, resume: false }),
@@ -862,7 +972,15 @@ export class DockerRuntime implements AppRuntime {
 
         if (!res.ok) {
           this.#waitingForPreview = false;
-          throw new Error(data.error || data.output || 'Docker start failed');
+          dockerStartStatus.set(
+            formatStartStatus({
+              stage: 'error',
+              error: data.error || data.output || 'Docker start failed',
+              startedAt: dockerStartStatus.get().startedAt,
+            }),
+          );
+          this.#beginPreviewWatch();
+          return undefined;
         }
 
         this.#filesWrittenSinceRedeploy = false;
@@ -875,12 +993,40 @@ export class DockerRuntime implements AppRuntime {
 
         this.#markPreviewPending();
         return undefined;
+      } catch (error) {
+        console.warn('[DockerRuntime] start failed', error);
+        this.#waitingForPreview = false;
+        dockerStartStatus.set(
+          formatStartStatus({
+            stage: 'error',
+            error: 'The preview server was unreachable. Click Retry.',
+            startedAt: dockerStartStatus.get().startedAt,
+          }),
+        );
+        this.#beginPreviewWatch();
+        return undefined;
       } finally {
         if (!this.#waitingForPreview) {
           this.#setPreviewBusy(false);
         }
       }
     });
+  }
+
+  /** Retry while the runtime daemon is restarting (connection refused). */
+  async #fetchDaemon(url: string, init: RequestInit, attempts = 12): Promise<Response> {
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await fetch(url, init);
+      } catch (error) {
+        lastError = error;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * (attempt + 1), 4000)));
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error('Preview server was unreachable');
   }
 
   onPreview(callback: PreviewListener): () => void {
@@ -948,9 +1094,45 @@ export class DockerRuntime implements AppRuntime {
       const installing = stage === 'install' || stage === 'container';
       const waited = Date.now() - startedAt;
 
-      // Do not POST /resume here. Resume used to pkill the in-flight
-      // `npm install && npm run dev`, leaving a hollow node_modules and `vite: not found`.
       if (stage === 'error') {
+        const live = await this.#attachIfPreviewReady();
+
+        if (live) {
+          return;
+        }
+
+        /*
+         * A page reload calls POST /resume, which attaches to a live server or
+         * soft-starts after a failed boot. Do that once here so the first
+         * preview opens without a reload. Skip while npm is still installing —
+         * resume() itself no-ops for install/container and a young server.
+         */
+        if (!this.#resumedAfterError && this.#sessionKey) {
+          this.#resumedAfterError = true;
+          dockerStartStatus.set(
+            formatStartStatus({
+              stage: 'server',
+              startedAt: dockerStartStatus.get().startedAt || Date.now(),
+            }),
+          );
+
+          try {
+            const result = await this.resume(this.#sessionKey, { quiet: true });
+
+            if (result.preview) {
+              return;
+            }
+
+            if (result.softStarted) {
+              continue;
+            }
+          } catch (error) {
+            console.warn('[DockerRuntime] preview resume after start error failed', error);
+          }
+
+          await this.#pullStartStatus();
+        }
+
         this.#waitingForPreview = false;
         this.#setPreviewBusy(false);
         return;
@@ -961,6 +1143,26 @@ export class DockerRuntime implements AppRuntime {
 
         if (live) {
           return;
+        }
+
+        // Start log can say ready after the container was removed. One resume
+        // reattaches, or soft-starts when nothing is listening.
+        if (stage === 'ready' && !this.#resumedAfterError && this.#sessionKey && waited >= 8_000) {
+          this.#resumedAfterError = true;
+
+          try {
+            const result = await this.resume(this.#sessionKey, { quiet: true });
+
+            if (result.preview) {
+              return;
+            }
+
+            if (result.softStarted) {
+              continue;
+            }
+          } catch (error) {
+            console.warn('[DockerRuntime] preview resume after ready miss failed', error);
+          }
         }
       }
 

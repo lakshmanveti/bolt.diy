@@ -18,6 +18,25 @@ function getDockerRuntimeForActions(): DockerRuntime {
   return getExecutionRuntime() as DockerRuntime;
 }
 
+/** `npm install` with no chained command. Runs in the background so later files are not blocked. */
+function isPlainInstallCommand(command: string): boolean {
+  const trimmed = command.trim();
+
+  if (!trimmed || /[;&|]/.test(trimmed)) {
+    return false;
+  }
+
+  return /^(?:npm\s+(?:install|i)|pnpm\s+(?:install|i)|yarn(?:\s+install)?|bun\s+install)(?:\s+--[\w=.-]+)*$/i.test(
+    trimmed,
+  );
+}
+
+function isDevServerCommand(command: string): boolean {
+  return /(?:^|(?:&&|\|\||;)\s*)(?:npm\s+run\s+dev|pnpm\s+(?:run\s+)?dev|yarn\s+dev|bun\s+(?:run\s+)?dev|npx\s+vite|vite(?:\s|$)|next\s+dev)\b/i.test(
+    command.trim(),
+  );
+}
+
 async function bindDockerSession() {
   if (!isDockerExecution()) {
     return;
@@ -289,6 +308,16 @@ export class ActionRunner {
     }
 
     if (isDockerExecution()) {
+      if (isPlainInstallCommand(action.content)) {
+        getDockerRuntimeForActions().trackBackgroundInstall();
+        return;
+      }
+
+      if (isDevServerCommand(action.content)) {
+        await this.#startDockerDevServer(action.content);
+        return;
+      }
+
       await bindDockerSession();
       const runtime = getDockerRuntimeForActions();
       await runtime.ready();
@@ -323,23 +352,26 @@ export class ActionRunner {
     }
   }
 
+  async #startDockerDevServer(command: string) {
+    await bindDockerSession();
+    const runtime = getDockerRuntimeForActions();
+    await runtime.ready();
+
+    try {
+      await runtime.start?.(command);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed To Start Application';
+      throw new ActionCommandError('Failed To Start Application', message);
+    }
+  }
+
   async #runStartAction(action: ActionState) {
     if (action.type !== 'start') {
       unreachable('Expected shell action');
     }
 
     if (isDockerExecution()) {
-      await bindDockerSession();
-      const runtime = getDockerRuntimeForActions();
-      await runtime.ready();
-
-      try {
-        await runtime.start?.(action.content);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed To Start Application';
-        throw new ActionCommandError('Failed To Start Application', message);
-      }
-
+      await this.#startDockerDevServer(action.content);
       return;
     }
 

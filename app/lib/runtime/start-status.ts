@@ -43,10 +43,8 @@ export function formatStartStatus(raw: {
   if (stage === 'install') {
     return {
       stage,
-      title: packageName ? `Installing ${packageName}…` : 'Installing packages…',
-      detail: packagesAdded
-        ? `${packagesAdded} packages so far. First install can take several minutes on Windows.`
-        : 'Downloading dependencies. First install can take several minutes on Windows.',
+      title: 'Installing dependencies…',
+      detail: 'Downloading dependencies. First install can take several minutes on Windows.',
       packageName,
       packagesAdded,
       startedAt,

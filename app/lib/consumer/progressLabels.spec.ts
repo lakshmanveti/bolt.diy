@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { dedupeProgressItems, isDockerCoveredAction, labelForFilePath, labelForShell } from '~/lib/consumer/progressLabels';
+import {
+  dedupeProgressItems,
+  fileGenerationStillRunning,
+  isDockerCoveredAction,
+  labelForFilePath,
+  labelForShell,
+} from '~/lib/consumer/progressLabels';
 
 describe('progressLabels', () => {
   it('maps common file paths to friendly labels', () => {
@@ -18,6 +24,13 @@ describe('progressLabels', () => {
     expect(isDockerCoveredAction({ type: 'shell', content: 'pnpm run dev -- --host' })).toBe(true);
     expect(isDockerCoveredAction({ type: 'shell', content: 'ls src' })).toBe(false);
     expect(isDockerCoveredAction({ type: 'file', content: '' })).toBe(false);
+  });
+
+  it('keeps file progress up while generation is still producing files', () => {
+    expect(fileGenerationStillRunning(true, [{ status: 'complete' }])).toBe(true);
+    expect(fileGenerationStillRunning(false, [{ status: 'running' }])).toBe(true);
+    expect(fileGenerationStillRunning(false, [{ status: 'pending' }])).toBe(true);
+    expect(fileGenerationStillRunning(false, [{ status: 'complete' }])).toBe(false);
   });
 
   it('dedupes by label preferring running status', () => {

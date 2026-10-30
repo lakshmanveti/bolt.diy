@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdir, writeFile, rm, access, readdir, copyFile, readFile, rename } from 'node:fs/promises';
+import { mkdir, writeFile, rm, access, readdir, copyFile, readFile, rename, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -125,12 +125,33 @@ async function pruneStaleContainers() {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  for (const id of ids) {
-    await run('docker', ['rm', '-f', id], { timeoutMs: 20_000 });
+  let sessionNames = [];
+
+  try {
+    sessionNames = await readdir(SESSIONS_DIR);
+  } catch {
+    sessionNames = [];
   }
 
-  if (ids.length) {
-    console.log(`[runtime-daemon] pruned ${ids.length} stale runtime container(s)`);
+  let removed = 0;
+
+  for (const id of ids) {
+    const inspected = await run('docker', ['inspect', '-f', '{{.Name}}', id], { timeoutMs: 15_000 });
+    const name = inspected.stdout.trim().replace(/^\//, '');
+    const prefix = name.replace(/^buildlive-runtime-/, '');
+    const stillUsed = prefix && sessionNames.some((entry) => entry.startsWith(prefix));
+
+    // A daemon restart must not delete the container that is still installing or serving.
+    if (stillUsed) {
+      continue;
+    }
+
+    await run('docker', ['rm', '-f', id], { timeoutMs: 20_000 });
+    removed += 1;
+  }
+
+  if (removed) {
+    console.log(`[runtime-daemon] pruned ${removed} stale runtime container(s)`);
   }
 }
 
@@ -678,17 +699,57 @@ async function pathExistsInSession(session, relPath) {
   }
 }
 
-/** A node_modules folder is not enough — interrupted installs leave hollow trees. */
+const VITE_JS = 'node_modules/vite/bin/vite.js';
+/** Bypass node_modules/.bin. On Windows Docker that shim is a junction Linux cannot execute (`vite: not found`). */
+const VITE_DEV = `node ${VITE_JS} --host 0.0.0.0 --port 5173`;
+
+function viteDevCommand(needsInstall) {
+  return needsInstall ? `npm install && ${VITE_DEV}` : VITE_DEV;
+}
+
+/**
+ * `npm run dev` looks up node_modules/.bin/vite. A package.json or a Windows
+ * junction is not enough — only vite.js can actually boot inside the container.
+ */
 async function sessionHasUsableInstall(session) {
+  return pathExistsInSession(session, VITE_JS);
+}
+
+/** Rewrite `npm run dev` / bare `vite` so a broken .bin shim cannot fail the preview. */
+async function normalizeDevCommand(session, command) {
+  const text = String(command || '').trim();
+
+  if (!text || text.includes(VITE_JS)) {
+    return text;
+  }
+
+  const launchesDevServer = /\bnpm(?:\s+run)?\s+dev\b|\bvite\b/.test(text);
+
+  if (!launchesDevServer) {
+    return text;
+  }
+
+  const hasJsx = await sessionHasJsxOrTsx(session);
+  const hasViteJs = await pathExistsInSession(session, VITE_JS);
+  const hasVitePkg = await pathExistsInSession(session, 'node_modules/vite/package.json');
+
+  if (!hasJsx && !hasViteJs && !hasVitePkg) {
+    return text;
+  }
+
+  return viteDevCommand(/\bnpm install\b/.test(text) || !hasViteJs);
+}
+
+async function sessionHasInstallTree(session) {
   return (
-    (await pathExistsInSession(session, 'node_modules/.bin/vite')) ||
-    (await pathExistsInSession(session, 'node_modules/vite/bin/vite.js')) ||
-    (await pathExistsInSession(session, 'node_modules/vite/package.json'))
+    (await sessionHasUsableInstall(session)) ||
+    (await pathExistsInSession(session, 'node_modules/.bin')) ||
+    (await pathExistsInSession(session, 'node_modules/next/package.json'))
   );
 }
 
 async function removeBrokenNodeModules(session) {
-  if (!(await pathExistsInSession(session, 'node_modules')) || (await sessionHasUsableInstall(session))) {
+  if (!(await pathExistsInSession(session, 'node_modules')) || (await sessionHasInstallTree(session))) {
     return false;
   }
 
@@ -998,7 +1059,7 @@ async function ensureViteReactScaffold(session) {
           private: true,
           type: 'module',
           scripts: {
-            dev: 'vite --host 0.0.0.0 --port 5173',
+            dev: 'node node_modules/vite/bin/vite.js --host 0.0.0.0 --port 5173',
           },
           dependencies: {
             react: '^18.3.1',
@@ -1029,9 +1090,7 @@ async function ensureViteReactScaffold(session) {
 
   if (!hasAppTsx && !hasAppJsx) {
     // Do not invent a placeholder App — empty sessions must wait for generated files.
-    return hasNodeModules
-      ? 'npm run dev -- --host 0.0.0.0 --port 5173'
-      : 'npm install && npm run dev -- --host 0.0.0.0 --port 5173';
+    return viteDevCommand(!hasNodeModules);
   }
 
   if (!hasMainTsx && !hasMainJsx) {
@@ -1069,11 +1128,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     );
   }
 
-  if (hasNodeModules) {
-    return 'npm run dev -- --host 0.0.0.0 --port 5173';
-  }
-
-  return 'npm install && npm run dev -- --host 0.0.0.0 --port 5173';
+  return viteDevCommand(!hasNodeModules);
 }
 
 async function ensureStaticServerScript(session) {
@@ -1097,7 +1152,7 @@ async function chooseFallbackStart(session) {
   }
 
   if (hasPkg) {
-    return 'npm run dev -- --host 0.0.0.0 --port 5173';
+    return normalizeDevCommand(session, 'npm run dev -- --host 0.0.0.0 --port 5173');
   }
 
   if (hasIndex) {
@@ -1119,6 +1174,11 @@ function setStartStatus(session, patch) {
 }
 
 async function refreshStartStatusFromLog(session) {
+  if (session.installRunning) {
+    await publishInstallProgress(session);
+    return session.startStatus;
+  }
+
   if (session.startLogInflight) {
     return session.startLogInflight;
   }
@@ -1145,6 +1205,224 @@ async function refreshStartStatusFromLog(session) {
   });
 
   return session.startLogInflight;
+}
+
+const INSTALL_LOG_FILENAME = '.buildlive-install.log';
+const INSTALL_EXIT_FILENAME = '.buildlive-install.exit';
+
+/** Stable key for dependency changes. Incomplete JSON returns null so a half-streamed file does not install. */
+function packageJsonDepsKey(content) {
+  const text = String(content || '').replace(/^\uFEFF/, '').trim();
+
+  if (!text.endsWith('}')) {
+    return null;
+  }
+
+  try {
+    const pkg = JSON.parse(text);
+
+    if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) {
+      return null;
+    }
+
+    if (!pkg.dependencies && !pkg.devDependencies) {
+      return null;
+    }
+
+    return JSON.stringify({
+      dependencies: pkg.dependencies || {},
+      devDependencies: pkg.devDependencies || {},
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function readInstallExitCode(session) {
+  try {
+    const text = await readFile(path.join(session.workdir, INSTALL_EXIT_FILENAME), 'utf8');
+    const trimmed = text.trim();
+
+    if (!trimmed) {
+      return null;
+    }
+
+    const code = Number(trimmed);
+    return Number.isFinite(code) ? code : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readInstallLog(session) {
+  try {
+    return await readFile(path.join(session.workdir, INSTALL_LOG_FILENAME), 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+async function publishInstallProgress(session) {
+  const log = await readInstallLog(session);
+
+  if (!log.trim()) {
+    return;
+  }
+
+  const parsed = parseStartLog(log);
+  setStartStatus(session, {
+    stage: 'install',
+    packageName: parsed.packageName,
+    packagesAdded: parsed.packagesAdded,
+    error: null,
+    logLength: parsed.logLength,
+  });
+}
+
+/**
+ * npm install in the background as soon as package.json is complete.
+ * File writes stay unblocked. Vite boot waits on session.installRunning.
+ */
+async function beginBackgroundInstall(session, packageJsonText, { continueJob = false } = {}) {
+  const key = packageJsonDepsKey(packageJsonText);
+
+  if (!key) {
+    if (continueJob) {
+      session.installRunning = false;
+    }
+
+    return { started: false, reason: 'incomplete' };
+  }
+
+  if (!continueJob && session.installRunning) {
+    if (key !== session.installingDepsKey) {
+      session.installAgainKey = key;
+    }
+
+    return { started: false, alreadyRunning: true };
+  }
+
+  if (
+    !continueJob &&
+    key === session.installedDepsKey &&
+    (await sessionHasUsableInstall(session))
+  ) {
+    return { started: false, reason: 'unchanged' };
+  }
+
+  session.installRunning = true;
+  session.installingDepsKey = key;
+  session.installAgainKey = null;
+  session.installExitCode = null;
+
+  await rm(path.join(session.workdir, INSTALL_EXIT_FILENAME), { force: true }).catch(() => undefined);
+  setStartStatus(session, {
+    stage: 'install',
+    error: null,
+    packageName: null,
+    packagesAdded: null,
+    startedAt: Date.now(),
+  });
+
+  const logPath = `${CONTAINER_WORKDIR}/${INSTALL_LOG_FILENAME}`;
+  const exitPath = `${CONTAINER_WORKDIR}/${INSTALL_EXIT_FILENAME}`;
+  const inner = `cd ${JSON.stringify(CONTAINER_WORKDIR)} && npm install --no-audit --no-fund --loglevel http > ${JSON.stringify(logPath)} 2>&1; echo $? > ${JSON.stringify(exitPath)}`;
+  const wrapped = `nohup bash -lc ${JSON.stringify(inner)} >/dev/null 2>&1 &`;
+
+  try {
+    console.log(`[runtime-daemon] background npm install session=${session.id}`);
+    await dockerExec(session, wrapped);
+  } catch (error) {
+    session.installRunning = false;
+    console.warn('[runtime-daemon] failed to spawn npm install', error);
+    throw error;
+  }
+
+  void followBackgroundInstall(session);
+  return { started: true };
+}
+
+async function followBackgroundInstall(session) {
+  const deadline = Date.now() + 10 * 60_000;
+
+  try {
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await publishInstallProgress(session);
+      const code = await readInstallExitCode(session);
+
+      if (code != null) {
+        session.installExitCode = code;
+        break;
+      }
+    }
+
+    const again = session.installAgainKey;
+    session.installAgainKey = null;
+
+    if (again && again !== session.installingDepsKey) {
+      const text = await readFile(path.join(session.workdir, 'package.json'), 'utf8').catch(() => '');
+      await beginBackgroundInstall(session, text, { continueJob: true });
+      return;
+    }
+
+    session.installRunning = false;
+
+    if (session.installExitCode === 0) {
+      session.installedDepsKey = session.installingDepsKey;
+      setStartStatus(session, { stage: 'server', error: null });
+    } else {
+      const parsed = parseStartLog(await readInstallLog(session));
+      setStartStatus(session, {
+        stage: 'error',
+        error: parsed.error || 'npm install failed',
+      });
+    }
+  } catch (error) {
+    session.installRunning = false;
+    console.warn('[runtime-daemon] background install watcher failed', error);
+    setStartStatus(session, { stage: 'error', error: 'npm install failed' });
+  }
+}
+
+async function waitForBackgroundInstall(session) {
+  const deadline = Date.now() + 10 * 60_000;
+
+  while (session.installRunning && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+}
+
+async function installLogIsActive(session) {
+  try {
+    const info = await stat(path.join(session.workdir, INSTALL_LOG_FILENAME));
+    return Date.now() - info.mtimeMs < 8_000;
+  } catch {
+    return false;
+  }
+}
+
+/** Survives a daemon restart: memory loses installRunning, but npm may still be writing the log. */
+async function installStatus(session) {
+  if (session.installRunning) {
+    return { running: true, exitCode: null };
+  }
+
+  const code = session.installExitCode ?? (await readInstallExitCode(session));
+
+  if (code != null) {
+    session.installExitCode = code;
+    return { running: false, exitCode: code };
+  }
+
+  if (!session.installRecovered && (await installLogIsActive(session))) {
+    session.installRecovered = true;
+    session.installRunning = true;
+    void followBackgroundInstall(session);
+    return { running: true, exitCode: null };
+  }
+
+  return { running: false, exitCode: null };
 }
 
 async function startCommand(session, command) {
@@ -1210,7 +1488,15 @@ async function waitForPreview(session, attempts = 30, delayMs = 700) {
     }
 
     if (status?.stage === 'error') {
-      return preview;
+      // A stale error line must not hide a server that is already responding.
+      const live = await resolvePreview(session, { force: true });
+
+      if (live?.ready) {
+        setStartStatus(session, { stage: 'ready', error: null });
+        return live;
+      }
+
+      return live || preview;
     }
 
     preview = await resolvePreview(session);
@@ -1227,6 +1513,19 @@ async function waitForPreview(session, attempts = 30, delayMs = 700) {
   return preview;
 }
 
+async function previewPortListening(session) {
+  try {
+    const result = await dockerExec(
+      session,
+      'grep -E -i ":1439 |:0BB8 |:104D |:1F90 |:1388 |:10E1 " /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -q " 0A " && echo yes || echo no',
+      { timeoutMs: 8_000 },
+    );
+    return /\byes\b/.test(result.stdout || '');
+  } catch {
+    return false;
+  }
+}
+
 function invalidatePreview(session) {
   session.previewProbedAt = 0;
   if (session.preview) {
@@ -1236,10 +1535,98 @@ function invalidatePreview(session) {
 
 async function stopAppProcesses(session) {
   invalidatePreview(session);
-  await dockerExec(session, "bash -lc 'pkill -9 -f \"vite|next|react-scripts|buildlive-static-server|http.server\" 2>/dev/null || true'");
-  await dockerExec(session, "bash -lc 'pkill -9 -x node 2>/dev/null || true'");
-  await dockerExec(session, "bash -lc 'for p in 5173 3000 4173 8080 5000 4321; do (command -v fuser >/dev/null 2>&1 && fuser -k ${p}/tcp >/dev/null 2>&1) || true; done'");
-  await dockerExec(session, 'sleep 0.2');
+
+  // node:22-bookworm has no pkill/fuser. Match /proc cmdline and wait until the
+  // listen socket is gone so the next Vite does not die with EADDRINUSE.
+  await dockerExec(
+    session,
+    [
+      'set +e',
+      'kill_app() {',
+      '  for d in /proc/[0-9]*; do',
+      '    [ -r "$d/cmdline" ] || continue',
+      '    pid=${d##*/}',
+      '    if grep -a -q -E "vite|next|react-scripts|buildlive-static-server|http.server" "$d/cmdline" 2>/dev/null; then',
+      '      kill -9 "$pid" 2>/dev/null || true',
+      '    fi',
+      '  done',
+      '  if command -v fuser >/dev/null 2>&1; then',
+      '    fuser -k 5173/tcp 3000/tcp 4173/tcp 8080/tcp 5000/tcp 4321/tcp >/dev/null 2>&1 || true',
+      '  fi',
+      '}',
+      'port_busy() {',
+      '  grep -E -i ":1439 |:0BB8 |:104D |:1F90 |:1388 |:10E1 " /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -q " 0A "',
+      '}',
+      'kill_app',
+      'for _ in 1 2 3 4 5 6 7 8; do',
+      '  port_busy || exit 0',
+      '  kill_app',
+      '  sleep 0.25',
+      'done',
+    ].join('\n'),
+  );
+}
+
+/**
+ * Boot `command` and wait for HTTP. If something is already bound to the dev
+ * port, keep that server when it responds; otherwise free the port and try once more.
+ */
+async function previewAfterStart(session, command, attempts, delayMs, options = {}) {
+  // Files keep streaming while npm install runs. Do not boot Vite on a half-written node_modules.
+  await waitForBackgroundInstall(session);
+  command = await normalizeDevCommand(session, command);
+  const launched = await startCommand(session, command);
+
+  if (launched.exitCode !== 0) {
+    return {
+      ok: false,
+      preview: null,
+      output: `${launched.stdout}${launched.stderr}`.trim(),
+    };
+  }
+
+  session.lastCommand = command;
+  let preview = await waitForPreview(session, attempts, delayMs);
+
+  if (preview?.ready) {
+    return { ok: true, preview };
+  }
+
+  const log = await readStartLog(session);
+
+  // Broken .bin shim or a hollow install. One reinstall, then boot vite.js directly.
+  if (!options.retried && /vite:\s*not found|not found:\s*vite/i.test(log)) {
+    console.log(`[runtime-daemon] vite missing, reinstalling session=${session.id}`);
+    await stopAppProcesses(session);
+    setStartStatus(session, { stage: 'install', error: null, startedAt: Date.now() });
+    return previewAfterStart(session, viteDevCommand(true), attempts, delayMs, { retried: true });
+  }
+
+  if (!/already in use|EADDRINUSE/i.test(log)) {
+    return { ok: true, preview };
+  }
+
+  const existing = await resolvePreview(session, { force: true });
+
+  if (existing?.ready) {
+    setStartStatus(session, { stage: 'ready', error: null });
+    return { ok: true, preview: existing };
+  }
+
+  console.log(`[runtime-daemon] port in use, freeing listeners session=${session.id}`);
+  await stopAppProcesses(session);
+  const retry = await startCommand(session, command);
+
+  if (retry.exitCode !== 0) {
+    return {
+      ok: false,
+      preview,
+      output: `${retry.stdout}${retry.stderr}`.trim(),
+    };
+  }
+
+  preview = await waitForPreview(session, attempts, delayMs);
+  return { ok: true, preview };
 }
 
 /**
@@ -1247,6 +1634,10 @@ async function stopAppProcesses(session) {
  * Vite keeps a transform cache in memory; iframe reload alone will not pick up bind-mount writes.
  */
 async function restartSession(session) {
+  return withLock(`ops:${session.id}`, () => restartSessionBody(session));
+}
+
+async function restartSessionBody(session) {
   await ensureSessionContainer(session);
 
   await stopAppProcesses(session);
@@ -1273,15 +1664,17 @@ async function restartSession(session) {
   // Flush host bind-mount writes into the container before Node boots (Windows Docker can lag).
   await dockerExec(session, 'sync || true');
   await dockerExec(session, 'sleep 0.5');
-  await startCommand(session, command);
-  session.lastCommand = command;
-  const preview = await waitForPreview(session, 8, 400);
+  const started = await previewAfterStart(session, command, 8, 400);
+
+  if (!started.ok) {
+    return { ok: false, error: started.output || 'Failed to start command', preview: null, command };
+  }
 
   return {
     ok: true,
-    pending: !preview?.ready,
+    pending: !started.preview?.ready,
     command,
-    preview,
+    preview: started.preview,
   };
 }
 
@@ -1394,9 +1787,9 @@ async function softStartSession(session) {
     if (hasJsx) {
       command = await ensureViteReactScaffold(session);
     } else if (hasNodeModules) {
-      command = 'npm run dev -- --host 0.0.0.0 --port 5173';
+      command = VITE_DEV;
     } else {
-      command = 'npm install && npm run dev -- --host 0.0.0.0 --port 5173';
+      command = viteDevCommand(true);
     }
   } else if (hasIndex) {
     command = await ensureStaticServerScript(session);
@@ -1414,10 +1807,8 @@ async function softStartSession(session) {
     startedAt: Date.now(),
   });
 
-  await startCommand(session, command);
-  session.lastCommand = command;
-  const preview = await waitForPreview(session, 24, 500);
-  return { command, preview };
+  const started = await previewAfterStart(session, command, 24, 500);
+  return { command, preview: started.preview };
 }
 
 /**
@@ -1425,6 +1816,10 @@ async function softStartSession(session) {
  * This is what a chat page reload does — first-generate waits should use the same path.
  */
 async function resumeSession(session) {
+  return withLock(`ops:${session.id}`, () => resumeSessionBody(session));
+}
+
+async function resumeSessionBody(session) {
   await ensureSessionContainer(session);
 
   const hasNodeModules = await sessionHasUsableInstall(session);
@@ -1459,8 +1854,21 @@ async function resumeSession(session) {
     };
   }
 
-  // Do not pkill an in-flight `npm install && npm run dev` — that leaves a hollow node_modules.
+  // Do not pkill an in-flight npm install — that leaves a hollow node_modules.
+  // A ready log with a live listen socket means Vite booted and the HTTP probe
+  // is just late (common on Windows). A ready log with nothing listening means
+  // the container was recreated and the log is stale — soft-start.
   if (stage === 'install' || stage === 'container' || (stage === 'server' && age < 90_000)) {
+    return {
+      resumed: false,
+      softStarted: false,
+      hasNodeModules,
+      hasFiles: true,
+      preview: preview || null,
+    };
+  }
+
+  if (stage === 'ready' && (await previewPortListening(session))) {
     return {
       resumed: false,
       softStarted: false,
@@ -1492,6 +1900,114 @@ function withHostFlag(command) {
     return `${command} -H 0.0.0.0`;
   }
   return command;
+}
+
+async function handleStartRequest(req, res, session) {
+  const body = await readBody(req);
+  let command = String(body.command || '').trim();
+
+  if (!command) {
+    json(res, 400, { error: 'command is required' });
+    return;
+  }
+
+  // Prefer an already-running preview (chat reopen / duplicate start)
+  if (body.resume !== false) {
+    await ensureInspectorAssets(session);
+    const existing = await resolvePreview(session);
+
+    if (existing?.ready) {
+      json(res, 200, {
+        ok: true,
+        resumed: true,
+        command: null,
+        preview: existing,
+      });
+      return;
+    }
+  }
+
+  await ensureInspectorAssets(session);
+
+  command = withHostFlag(command);
+
+  await stopAppProcesses(session);
+  await removeBrokenNodeModules(session);
+
+  const hasPkg = await pathExistsInSession(session, 'package.json');
+  const hasIndex = await pathExistsInSession(session, 'index.html');
+  const hasJsx = await sessionHasJsxOrTsx(session);
+  const hasNodeModules = await sessionHasUsableInstall(session);
+
+  if (hasJsx) {
+    command = await ensureViteReactScaffold(session);
+    console.log(`[runtime-daemon] JSX/TSX app → ${command}`);
+  } else if (!hasPkg && hasIndex && /\b(npm|pnpm|yarn|vite|next)\b/.test(command)) {
+    command = await ensureStaticServerScript(session);
+    console.log(`[runtime-daemon] static site detected → ${command}`);
+  } else if (hasPkg && hasNodeModules && /\bnpm install\b/.test(command)) {
+    command = command.replace(/\bnpm install\s*&&\s*/g, '');
+    console.log(`[runtime-daemon] skip npm install (node_modules present) → ${command}`);
+  }
+
+  command = withInstallProgress(command);
+  const needsInstall = /\bnpm install\b/.test(command);
+  setStartStatus(session, {
+    stage: needsInstall ? 'install' : 'server',
+    packageName: null,
+    packagesAdded: null,
+    error: null,
+    startedAt: Date.now(),
+  });
+
+  console.log(`[runtime-daemon] start session=${session.id} cmd=${command}`);
+  let started = await previewAfterStart(session, command, 8, 400);
+
+  if (!started.ok) {
+    json(res, 500, {
+      error: 'Failed to start command',
+      output: started.output,
+    });
+    return;
+  }
+
+  let preview = started.preview;
+
+  if (!preview?.ready) {
+    const log = await readStartLog(session);
+    const parsed = parseStartLog(log);
+    const fallback = await chooseFallbackStart(session);
+
+    if (parsed.error && fallback && fallback !== command) {
+      console.log(`[runtime-daemon] fallback start session=${session.id} cmd=${fallback}`);
+      await stopAppProcesses(session);
+      command = withInstallProgress(fallback);
+      setStartStatus(session, {
+        stage: /\bnpm install\b/.test(command) ? 'install' : 'server',
+        error: null,
+        startedAt: Date.now(),
+      });
+      started = await previewAfterStart(session, command, 8, 400);
+
+      if (!started.ok) {
+        json(res, 500, {
+          error: 'Failed to start command',
+          output: started.output,
+        });
+        return;
+      }
+
+      preview = started.preview;
+    }
+  }
+
+  session.lastCommand = command;
+  json(res, 200, {
+    ok: true,
+    pending: !preview?.ready,
+    command,
+    preview: preview || null,
+  });
 }
 
 const server = createServer(async (req, res) => {
@@ -1681,7 +2197,7 @@ const server = createServer(async (req, res) => {
     }
 
     const sessionMatch = pathname.match(
-      /^\/sessions\/([^/]+)(?:\/(files|exec|start-status|start|preview|resume|restart))?$/,
+      /^\/sessions\/([^/]+)(?:\/(files|exec|start-status|start|preview|resume|restart|install))?$/,
     );
     if (!sessionMatch) {
       notFound(res);
@@ -1723,6 +2239,8 @@ const server = createServer(async (req, res) => {
         files[body.path] = body.content;
       }
 
+      let packageJsonText = null;
+
       for (const [relPath, content] of Object.entries(files)) {
         const normalized = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '');
         const abs = path.join(session.workdir, normalized);
@@ -1731,11 +2249,41 @@ const server = createServer(async (req, res) => {
             ? content
             : Buffer.from(content.data || '', content.encoding === 'base64' ? 'base64' : 'utf8');
         await atomicWriteFile(abs, data);
+
+        if (normalized === 'package.json') {
+          packageJsonText = typeof data === 'string' ? data : data.toString('utf8');
+        }
       }
 
       // Ensure container exists so volume is mounted
       await ensureSessionContainer(session);
-      json(res, 200, { ok: true, count: Object.keys(files).length });
+
+      let install = null;
+
+      if (packageJsonText) {
+        install = await beginBackgroundInstall(session, packageJsonText).catch((error) => {
+          console.warn('[runtime-daemon] background install failed to start', error);
+          return { started: false, reason: 'spawn-failed' };
+        });
+      }
+
+      json(res, 200, { ok: true, count: Object.keys(files).length, install });
+      return;
+    }
+
+    if (req.method === 'GET' && action === 'install') {
+      const status = await installStatus(session);
+      json(res, 200, status);
+      return;
+    }
+
+    if (req.method === 'POST' && action === 'install') {
+      const text = await readFile(path.join(session.workdir, 'package.json'), 'utf8').catch(() => '');
+      const install = await beginBackgroundInstall(session, text).catch((error) => {
+        console.warn('[runtime-daemon] background install failed to start', error);
+        return { started: false, reason: 'spawn-failed' };
+      });
+      json(res, 200, { ok: true, ...install, running: Boolean(session.installRunning) });
       return;
     }
 
@@ -1756,97 +2304,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && action === 'start') {
-      const body = await readBody(req);
-      let command = String(body.command || '').trim();
-      if (!command) {
-        json(res, 400, { error: 'command is required' });
-        return;
-      }
-
-      // Prefer an already-running preview (chat reopen / duplicate start)
-      if (body.resume !== false) {
-        await ensureInspectorAssets(session);
-        const existing = await resolvePreview(session);
-        if (existing?.ready) {
-          json(res, 200, {
-            ok: true,
-            resumed: true,
-            command: null,
-            preview: existing,
-          });
-          return;
-        }
-      }
-
-      await ensureInspectorAssets(session);
-
-      command = withHostFlag(command);
-
-      await stopAppProcesses(session);
-      await removeBrokenNodeModules(session);
-
-      // Choose the right runner: Vite for JSX/TSX, static server for plain HTML
-      const hasPkg = await pathExistsInSession(session, 'package.json');
-      const hasIndex = await pathExistsInSession(session, 'index.html');
-      const hasJsx = await sessionHasJsxOrTsx(session);
-      const hasNodeModules = await sessionHasUsableInstall(session);
-
-      if (hasJsx) {
-        command = await ensureViteReactScaffold(session);
-        console.log(`[runtime-daemon] JSX/TSX app → ${command}`);
-      } else if (!hasPkg && hasIndex && /\b(npm|pnpm|yarn|vite|next)\b/.test(command)) {
-        command = await ensureStaticServerScript(session);
-        console.log(`[runtime-daemon] static site detected → ${command}`);
-      } else if (hasPkg && hasNodeModules && /\bnpm install\b/.test(command)) {
-        // Skip redundant install when Vite is actually present
-        command = command.replace(/\bnpm install\s*&&\s*/g, '');
-        console.log(`[runtime-daemon] skip npm install (node_modules present) → ${command}`);
-      }
-
-      command = withInstallProgress(command);
-      const needsInstall = /\bnpm install\b/.test(command);
-      setStartStatus(session, {
-        stage: needsInstall ? 'install' : 'server',
-        packageName: null,
-        packagesAdded: null,
-        error: null,
-        startedAt: Date.now(),
-      });
-
-      console.log(`[runtime-daemon] start session=${session.id} cmd=${command}`);
-      let result = await startCommand(session, command);
-      if (result.exitCode !== 0) {
-        json(res, 500, {
-          error: 'Failed to start command',
-          output: `${result.stdout}${result.stderr}`.trim(),
-        });
-        return;
-      }
-
-      // Return immediately. Client waits on GET /start-status (host log) then one GET /preview.
-      let preview = await waitForPreview(session, 8, 400);
-
-      if (!preview?.ready) {
-        const log = await readStartLog(session);
-        const parsed = parseStartLog(log);
-        const fallback = await chooseFallbackStart(session);
-
-        if (parsed.error && fallback && fallback !== command) {
-          console.log(`[runtime-daemon] fallback start session=${session.id} cmd=${fallback}`);
-          await stopAppProcesses(session);
-          command = withInstallProgress(fallback);
-          await startCommand(session, command);
-          preview = await waitForPreview(session, 8, 400);
-        }
-      }
-
-      session.lastCommand = command;
-      json(res, 200, {
-        ok: true,
-        pending: !preview?.ready,
-        command,
-        preview: preview || null,
-      });
+      await withLock(`ops:${session.id}`, () => handleStartRequest(req, res, session));
       return;
     }
 

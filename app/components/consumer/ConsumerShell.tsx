@@ -38,6 +38,7 @@ import { HeadlessBoltTerminal } from './HeadlessBoltTerminal.client';
 import { AddBackendCard } from './AddBackendCard';
 import { useAddBackendPrompt } from './useAddBackendPrompt';
 import { formatPreviewErrorFollowup } from '~/lib/stores/preview-runtime-error';
+import { latestVisibleUserPrompt } from '~/lib/consumer/buildEngagement';
 import { syncSupabaseEnvToProject } from '~/lib/backend/sync-supabase-env';
 import {
   consumeQueuedMockGenerate,
@@ -417,33 +418,7 @@ export const ConsumerShell = React.forwardRef<HTMLDivElement, ConsumerShellProps
     const activeSession = mockActive || Boolean(chatStarted || isStreaming || (messages && messages.length > 0));
     const messageCount = messages?.length ?? 0;
     const lastMessageRole = messages?.[messageCount - 1]?.role;
-    const latestUserPrompt = (() => {
-      for (let i = (messages?.length ?? 0) - 1; i >= 0; i--) {
-        const message = messages![i];
-
-        if (message.role !== 'user') {
-          continue;
-        }
-
-        if (typeof message.content === 'string') {
-          return message.content;
-        }
-
-        if (Array.isArray(message.content)) {
-          const text = message.content
-            .filter((part: any) => part?.type === 'text' && typeof part.text === 'string')
-            .map((part: any) => part.text)
-            .join(' ')
-            .trim();
-
-          if (text) {
-            return text;
-          }
-        }
-      }
-
-      return undefined;
-    })();
+    const latestUserPrompt = latestVisibleUserPrompt(messages);
 
     // Always jump down when the user sends a message.
     useEffect(() => {

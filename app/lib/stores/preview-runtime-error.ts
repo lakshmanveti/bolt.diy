@@ -8,6 +8,32 @@ export type PreviewRuntimeError = {
 
 export const previewRuntimeErrorStore = atom<PreviewRuntimeError | null>(null);
 
+export type PreviewErrorReportAction = 'ignore' | 'queue' | 'show';
+
+/**
+ * A Supabase (or any) follow-up can compile-fail while the turn is still
+ * streaming or the preview process is restarting. Hold that report and show
+ * the fix/dismiss confirmation once the preview is idle — do not drop it.
+ */
+export function classifyPreviewErrorReport(options: {
+  message: string;
+  streaming: boolean;
+  previewBusy: boolean;
+  dismissedMessage?: string | null;
+}): PreviewErrorReportAction {
+  const message = options.message.trim();
+
+  if (!message || message === options.dismissedMessage) {
+    return 'ignore';
+  }
+
+  if (options.streaming || options.previewBusy) {
+    return 'queue';
+  }
+
+  return 'show';
+}
+
 export function setPreviewRuntimeError(error: PreviewRuntimeError) {
   const message = error.message.trim();
 

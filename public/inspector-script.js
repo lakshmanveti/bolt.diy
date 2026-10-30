@@ -3,6 +3,7 @@
   let inspectorStyle = null;
   let currentHighlight = null;
   let lastReportedError = '';
+  let overlayVisible = false;
 
   function shouldIgnoreError(message) {
     const text = String(message || '');
@@ -50,12 +51,19 @@
   function readViteOverlay() {
     const overlay = document.querySelector('vite-error-overlay');
     if (!overlay) {
+      if (overlayVisible) {
+        overlayVisible = false;
+        lastReportedError = '';
+        window.parent.postMessage({ type: 'BUILDLIVE_PREVIEW_RECOVERED' }, '*');
+      }
       return;
     }
     const text = ((overlay.shadowRoot && overlay.shadowRoot.textContent) || overlay.textContent || '').trim();
-    if (text) {
-      reportPreviewError({ message: text });
+    if (!text) {
+      return;
     }
+    overlayVisible = true;
+    reportPreviewError({ message: text });
   }
 
   const overlayObserver = new MutationObserver(readViteOverlay);
@@ -341,10 +349,25 @@
 
   // Listen for messages from parent
   window.addEventListener('message', function(event) {
-    if (event.data.type === 'INSPECTOR_ACTIVATE') {
-      setInspectorActive(event.data.active);
+    const data = event.data;
+    if (!data || typeof data !== 'object') {
+      return;
+    }
+    if (data.type === 'INSPECTOR_ACTIVATE') {
+      setInspectorActive(data.active);
+    }
+    if (data.type === 'BUILDLIVE_RECHECK_ERRORS') {
+      lastReportedError = '';
+      const hadOverlay = overlayVisible;
+      overlayVisible = false;
+      readViteOverlay();
+      if (hadOverlay && !document.querySelector('vite-error-overlay')) {
+        window.parent.postMessage({ type: 'BUILDLIVE_PREVIEW_RECOVERED' }, '*');
+      }
     }
   });
+
+  readViteOverlay();
 
   // Auto-inject if inspector is already active
   window.parent.postMessage({ type: 'INSPECTOR_READY' }, '*');
